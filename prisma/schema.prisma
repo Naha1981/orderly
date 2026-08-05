@@ -1,0 +1,414 @@
+// Orderly — Multi-tenant restaurant revenue growth platform
+// SQLite provider (project constraint). Tenant isolation is enforced at the
+// application data-access layer (scopedDb + mandatory tenantId argument).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Platform-level (not tenant-scoped)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String?
+  passwordHash String
+  role         String   @default("owner") // owner | manager | staff | super_admin
+  // Tenant linkage — null only for super_admin
+  tenantId     String?
+  tenant       Tenant?  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt @default(now())
+
+  sessions Session[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  userAgent String?
+  ip        String?
+
+  @@index([userId])
+}
+
+model Prospect {
+  id            String   @id @default(cuid())
+  restaurantName String
+  contactName   String?
+  phone         String
+  email         String?
+  industry      String   @default("restaurant")
+  status        String   @default("pending") // pending | invited | claimed | rejected
+  claimToken    String?  @unique
+  invitedAt     DateTime?
+  claimedAt     DateTime?
+  notes         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt @default(now())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tenants
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Tenant {
+  id              String   @id @default(cuid())
+  name            String
+  industry        String   @default("restaurant") // restaurant | cafe | bar | bakery | fast_food
+  brandingColor   String   @default("#16a34a")
+  logoUrl         String?
+  // Location for GPS-gated redemption
+  address         String?
+  latitude        Float?
+  longitude       Float?
+  geoRadiusMeters Int      @default(500)
+  // WhatsApp connection state
+  whatsappInstanceName  String?
+  whatsappInstanceToken String?
+  whatsappPhone         String?
+  whatsappStatus        String   @default("disconnected") // disconnected | connecting | connected | error
+  whatsappQrCode        String?
+  // Plan / billing
+  plan            String   @default("starter") // starter | growth
+  planStatus      String   @default("trial") // trial | active | past_due | cancelled
+  trialEndsAt     DateTime?
+  // Loyalty config
+  pointsPerVisit  Int      @default(10)
+  pointsPerRand   Int      @default(1) // points earned per ZAR spent
+  welcomeBonus    Int      @default(50)
+  currency        String   @default("ZAR")
+  // Slug for Smart Page (P2)
+  slug            String?  @unique
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt @default(now())
+
+  users                 User[]
+  customers             Customer[]
+  rewardsCatalog        RewardsCatalog[]
+  rewardRedemptions     RewardRedemption[]
+  campaigns             Campaign[]
+  campaignRecipients    CampaignRecipient[]
+  messages              Message[]
+  loyaltyTransactions   LoyaltyTransaction[]
+  automationRules       AutomationRule[]
+  automationRuns        AutomationRun[]
+  weeklyInsights        WeeklyInsight[]
+  webhookEvents         WebhookEvent[]
+  paymentTransactions   PaymentTransaction[]
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Customers & Loyalty
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Customer {
+  id            String   @id @default(cuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  phone         String
+  name          String?
+  pointsBalance Int      @default(0)
+  status        String   @default("active") // active | at_risk | dormant | vip | opted_out
+  totalVisits   Int      @default(0)
+  totalSpent    Float    @default(0)
+  lastVisitAt   DateTime?
+  joinedAt      DateTime @default(now())
+  consentAt     DateTime?
+  optedOutAt    DateTime?
+  source        String?  // qr | link | instagram | tiktok | facebook | google | manual
+  notes         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt @default(now())
+
+  loyaltyTransactions LoyaltyTransaction[]
+  rewardRedemptions   RewardRedemption[]
+  campaignRecipients  CampaignRecipient[]
+  messages            Message[]
+
+  @@unique([tenantId, phone])
+  @@index([tenantId, status])
+  @@index([tenantId, lastVisitAt])
+}
+
+model LoyaltyTransaction {
+  id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customerId  String
+  customer    Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  type        String   // earn | redeem | adjust | welcome_bonus | campaign_bonus
+  points      Int      // positive for earn, negative for redeem
+  reason      String
+  reference   String?  // campaign_id / automation_id / etc
+  metadata    String?  // JSON string
+  createdAt   DateTime @default(now())
+
+  @@index([tenantId, customerId])
+  @@index([tenantId, createdAt])
+}
+
+model RewardsCatalog {
+  id           String   @id @default(cuid())
+  tenantId     String
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name         String
+  description  String?
+  pointsCost   Int
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt @default(now())
+
+  redemptions RewardRedemption[]
+
+  @@index([tenantId, isActive])
+}
+
+model RewardRedemption {
+  id            String   @id @default(cuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customerId    String
+  customer      Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  rewardId      String
+  reward        RewardsCatalog @relation(fields: [rewardId], references: [id], onDelete: Cascade)
+  // Claim token & GPS-gated claim window
+  claimToken    String   @unique
+  status        String   @default("pending") // pending | claimed | expired | cancelled
+  expiresAt     DateTime
+  claimedAt     DateTime?
+  // GPS verification
+  customerLat   Float?
+  customerLng   Float?
+  distanceM     Float?
+  geoVerified   Boolean  @default(false)
+  confirmationQr String? // base64 or short code shown to staff
+  // Attribution
+  campaignId    String?
+  pointsCost    Int
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt @default(now())
+
+  @@index([tenantId, status])
+  @@index([tenantId, createdAt])
+  @@index([campaignId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Campaigns
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Campaign {
+  id            String   @id @default(cuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name          String
+  type          String   // fill_quiet_hours | bring_back_lost | reward_vips | custom
+  goal          String   // plain-English goal
+  message       String
+  audienceFilter String? // JSON filter spec
+  audienceCount Int      @default(0)
+  status        String   @default("draft") // draft | sending | sent | failed | scheduled
+  sentAt        DateTime?
+  // ROI estimate (pre-send)
+  estimatedRoiZAR Float?
+  estimatedResponseRate Float?
+  // Attribution (post-send)
+  redeemedCount Int      @default(0)
+  visitCount    Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt @default(now())
+
+  recipients CampaignRecipient[]
+
+  @@index([tenantId, status])
+  @@index([tenantId, type])
+  @@index([tenantId, createdAt])
+}
+
+model CampaignRecipient {
+  id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  campaignId  String
+  campaign    Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  customerId  String
+  customer    Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  messageId   String?
+  status      String   @default("pending") // pending | sent | failed | delivered
+  sentAt      DateTime?
+  redeemed    Boolean  @default(false)
+  redeemedAt  DateTime?
+  createdAt   DateTime @default(now())
+
+  @@unique([campaignId, customerId])
+  @@index([tenantId, campaignId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Messaging Engine
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Message {
+  id           String   @id @default(cuid())
+  tenantId     String
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customerId   String?
+  customer     Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  // Channel
+  channel      String   @default("whatsapp") // whatsapp | sms | email
+  direction    String   // inbound | outbound
+  to           String
+  from         String?
+  content      String
+  status       String   @default("pending") // pending | sent | delivered | failed
+  // Attribution
+  campaignId   String?
+  automationId String?
+  // Error info
+  error        String?
+  // External
+  externalId   String?
+  createdAt    DateTime @default(now())
+
+  @@index([tenantId, direction])
+  @@index([tenantId, createdAt])
+  @@index([tenantId, customerId])
+  @@index([campaignId])
+  @@index([automationId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Automation Engine
+// ─────────────────────────────────────────────────────────────────────────────
+
+model AutomationRule {
+  id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  category    String   // onboarding | loyalty | campaign | recovery | status | intelligence
+  trigger     String   // event:customer.joined | schedule:daily | inactivity:30d | manual:fill_quiet_hours
+  conditions  String   // JSON array of condition predicates
+  actions     String   // JSON array of action specs
+  cadence     String?  // for schedule triggers: 10m | hourly | daily | weekly
+  isActive    Boolean  @default(true)
+  priority    Int      @default(100)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt @default(now())
+
+  runs AutomationRun[]
+
+  @@index([tenantId, isActive])
+  @@index([tenantId, category])
+}
+
+model AutomationRun {
+  id              String   @id @default(cuid())
+  tenantId        String
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  ruleId          String
+  rule            AutomationRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  triggerEvent    String
+  entityId        String?  // customer_id / campaign_id / etc
+  idempotencyKey  String   @unique
+  status          String   @default("success") // success | failed | skipped
+  result          String?  // JSON summary
+  error           String?
+  createdAt       DateTime @default(now())
+
+  @@index([tenantId, ruleId])
+  @@index([tenantId, createdAt])
+  @@index([idempotencyKey])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Webhooks (audit trail for every inbound event)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model WebhookEvent {
+  id          String   @id @default(cuid())
+  tenantId    String?
+  tenant      Tenant?  @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+  source      String   // evolution | payfast
+  eventType   String?
+  payload     String   // raw JSON
+  verified    Boolean  @default(false)
+  processed   Boolean  @default(false)
+  error       String?
+  createdAt   DateTime @default(now())
+
+  @@index([source, createdAt])
+  @@index([tenantId, createdAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Billing
+// ─────────────────────────────────────────────────────────────────────────────
+
+model PaymentTransaction {
+  id              String   @id @default(cuid())
+  tenantId        String
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  // PayFast reference
+  pfPaymentId     String?
+  merchantPaymentId String?
+  amount          Float
+  currency        String   @default("ZAR")
+  status          String   @default("pending") // pending | complete | failed | cancelled
+  // Signature verification
+  signatureValid  Boolean  @default(false)
+  sourceIpValid   Boolean  @default(false)
+  amountValid     Boolean  @default(false)
+  serverValidated Boolean  @default(false)
+  rawPayload      String?
+  plan            String   // starter | growth
+  billingPeriod   String?  // monthly
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt @default(now())
+
+  @@index([tenantId, status])
+  @@index([pfPaymentId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Weekly Intelligence
+// ─────────────────────────────────────────────────────────────────────────────
+
+model WeeklyInsight {
+  id              String   @id @default(cuid())
+  tenantId        String
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  weekStart       DateTime
+  weekEnd         DateTime
+  // Pre-computed numbers (ground truth — the LLM composes around these)
+  newJoins        Int      @default(0)
+  activeCustomers Int      @default(0)
+  redemptions     Int      @default(0)
+  campaignsSent   Int      @default(0)
+  campaignRedeemed Int     @default(0)
+  totalRevenue    Float    @default(0)
+  // Generated narrative
+  summary         String
+  recommendations String   // JSON array of 3 strings
+  // Delivery
+  deliveredInApp  Boolean  @default(true)
+  deliveredWhatsapp Boolean @default(false)
+  deliveredAt     DateTime?
+  createdAt       DateTime @default(now())
+
+  @@unique([tenantId, weekStart])
+  @@index([tenantId, createdAt])
+}
