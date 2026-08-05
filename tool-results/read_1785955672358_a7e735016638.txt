@@ -1,0 +1,423 @@
+     1→# Orderly — Worklog
+     2→
+     3→This file is the shared worklog for all agents building Orderly.
+     4→Each agent appends a section after finishing its task.
+     5→
+     6→---
+     7→Task ID: 1
+     8→Agent: orchestrator
+     9→Task: Foundation — Prisma schema, db push, nullable clients, lib scaffolding
+    10→
+    11→Work Log:
+    12→- Read upload/PRD.md, plan.md, execution-plan.md, file-structure.md, spec files
+    13→- Authored prisma/schema.prisma with all multi-tenant tables (User, Session, Prospect, Tenant, Customer, LoyaltyTransaction, RewardsCatalog, RewardRedemption, Campaign, CampaignRecipient, Message, AutomationRule, AutomationRun, WebhookEvent, PaymentTransaction, WeeklyInsight)
+    14→- Ran `bun run db:push` successfully (SQLite)
+    15→- Wrote src/lib/db.ts with nullable client + Result<T,E> type + ok/err helpers + requireDb + scopedDb
+    16→- Wrote src/shared/types/index.ts (INDUSTRIES, PLANS, LOYALTY_KEYWORDS, PLAN_CUSTOMER_CAPS, REDEMPTION_TOKEN_TTL_MINUTES, etc.)
+    17→- Wrote src/shared/utils/geo.ts (haversineMeters, isWithinRadius, formatDistance)
+    18→- Wrote src/lib/security/password.ts (scrypt hash/verify, generateToken)
+    19→- Wrote src/lib/auth/session.ts (cookie-based sessions, getCurrentUser, requireUser)
+    20→- Wrote src/shared/utils/tenant-context.ts (getTenantContext, getTenantContextForRole)
+    21→- Wrote src/lib/integrations/evolution/client.ts (two-key model: global lifecycle + instance messaging; degrades gracefully)
+    22→- Wrote src/lib/integrations/payfast/client.ts (order-preserved MD5 signature, 4-check IPN, degrades gracefully)
+    23→- Wrote src/lib/ai/provider.ts (z-ai-web-dev-sdk wrapper, returns null on failure)
+    24→- Wrote src/lib/events/bus.ts (in-process domain event emitter with subscribe/emit)
+    25→- Created directories: src/modules/{tenants,customers,loyalty,campaigns,messaging/channels,automation,recovery,intelligence,billing,admin}, src/components/orderly, src/lib/{integrations,evolution,payfast,events,ai,security,auth}
+    26→- Dev server running on port 3000 (background)
+    27→
+    28→Stage Summary:
+    29→- Foundation complete. Schema in SQLite (multi-tenant via tenantId columns).
+    30→- All integration clients gracefully degrade when env vars missing (build never fails without secrets).
+    31→- Auth uses cookie-based sessions (no Clerk — adapted for sandbox).
+    32→- WhatsApp via Evolution API (two-key model), Payments via PayFast (order-preserved sig + 4-check IPN), AI via z-ai-web-dev-sdk.
+    33→- Ready for service module build-out.
+    34→
+    35→Key environment variables (all optional, app degrades gracefully without them):
+    36→- DATABASE_URL (set — SQLite local file)
+    37→- EVOLUTION_API_URL, EVOLUTION_GLOBAL_API_KEY, EVOLUTION_WEBHOOK_SECRET (WhatsApp)
+    38→- PAYFAST_MERCHANT_ID, PAYFAST_MERCHANT_KEY, PAYFAST_PASSPHRASE, PAYFAST_MODE
+    39→- CRON_SECRET
+    40→- NEXT_PUBLIC_APP_URL
+    41→
+    42→Tech adaptations from original spec:
+    43→- Prisma+SQLite instead of Drizzle+Neon (sandbox constraint)
+    44→- Cookie-based session auth instead of Clerk (no Clerk in sandbox)
+    45→- z-ai-web-dev-sdk instead of Vercel AI SDK
+    46→- All UI on `/` route as SPA (sandbox constraint: only `/` is user-visible)
+    47→- API routes at /api/* (webhooks at /api/webhooks/*, cron at /api/cron/*)
+    48→
+    49→---
+    50→Task ID: 5
+    51→Agent: campaigns-builder
+    52→Task: Build campaigns service module
+    53→
+    54→Work Log:
+    55→- Read worklog.md, prisma/schema.prisma, src/lib/db.ts, src/shared/types/index.ts, src/modules/messaging/service.ts, src/modules/loyalty/service.ts to understand contracts and conventions
+    56→- Authored src/modules/campaigns/service.ts (~520 LOC) exporting the 7 required functions + 5 required types
+    57→- resolveAudience: dynamic per-type Prisma where builder (typed as any to allow per-branch shape variance without TS narrowing complaints). fill_quiet_hours → lastVisitAt between now-60d and now-14d; bring_back_lost → lastVisitAt < now-60d AND status IN (at_risk, dormant); reward_vips → OR(status=vip, totalVisits>=10, totalSpent>=1000); custom → applies AudienceFilter (status, minDaysSinceVisit, maxDaysSinceVisit, minVisits, minSpend). All branches exclude opted_out (POPIA).
+    58→- estimateRoi: ROI_CONFIG per type (fill 15%/R80, lost 12%/R120, vip 35%/R200, custom 15%/R100). buildPlainEnglish() emits the spec format: "If X% of these N customers come in, that's about RY in additional revenue — <tail>." with type-specific tail. formatZAR uses manual thousands-separator to avoid Node ICU locale variance.
+    59→- createCampaign: validates name/message non-empty, inserts with status='draft'
+    60→- sendCampaign: full orchestration — fetch+validate campaign (rejects if status in {sending, sent}); resolveAudience; estimateRoi; flip status='sending' with audienceCount/estimatedRoiZAR/estimatedResponseRate; sequential loop with per-customer try/catch (one failure does NOT abort batch); upserts campaign_recipient via findUnique on [campaignId, customerId] + create/update; calls sendMessage with idempotencyKey `campaign-{campaignId}-{customerId}`; classifies outcome into sent/failed/skipped (idempotent-skip counts as sent, opted-out skip counts as skipped); on exception flips status back to 'failed' via updateMany (guarded where clause); emits 'campaign.sent' event
+    61→- attributeRedemption: verifies campaign+customer tenant-scoped; idempotent at recipient level (early-return if recipient.redeemed already true); increments campaign.redeemedCount + visitCount; emits 'campaign.redeemed'
+    62→- listCampaigns / getCampaign: tenant-scoped findMany/findFirst with include for recipients. getCampaign maps recipients to the typed shape.
+    63→- personalizeMessage: light {name} substitution (falls back to "there")
+    64→- parseAudienceFilter: safe JSON.parse for the stored audienceFilter column
+    65→- Tenant isolation: every function takes tenantId as first arg, every tenant-scoped query includes where: { tenantId, ... }, getCampaign/listCampaigns use findFirst/findMany with tenantId filter (not just .findUnique) to enforce scoping
+    66→- Verified with `bunx tsc --noEmit` — zero errors in campaigns/service.ts (pre-existing errors in messaging/service.ts and examples/skills are unrelated)
+    67→
+    68→Stage Summary:
+    69→- Campaigns service module complete: src/modules/campaigns/service.ts
+    70→- All 7 required exports implemented (resolveAudience, estimateRoi, createCampaign, sendCampaign, attributeRedemption, listCampaigns, getCampaign)
+    71→- All 5 required types exported (AudienceFilter, AudienceMember, RoiEstimate, CampaignSummary, CampaignDetail)
+    72→- All sends route through sendMessage() with the prescribed idempotencyKey format
+    73→- Sequential send loop respects the messaging engine's per-tenant 20/min rate limit (no manual throttling needed)
+    74→- Failure isolation: per-customer try/catch + outer try/catch that flips status='failed' on uncaught exceptions
+    75→- POPIA-compliant: opted_out customers excluded from audience resolution AND skipped at send time by the messaging engine
+    76→- Emits domain events (campaign.sent, campaign.redeemed) for the automation engine to subscribe to
+    77→- Ready to be wired into /api/campaigns/* routes and the owner dashboard UI
+    78→
+    79→---
+    80→Task ID: 7
+    81→Agent: intelligence-builder
+    82→Task: Build weekly intelligence service (LLM via z-ai-web-dev-sdk)
+    83→
+    84→Work Log:
+    85→- Read worklog.md, prisma/schema.prisma (WeeklyInsight, Customer, Campaign, CampaignRecipient, RewardRedemption, LoyaltyTransaction, Tenant), src/lib/ai/provider.ts, src/lib/db.ts, src/modules/messaging/service.ts
+    86→- Confirmed PRD.md §6.4 (Monday-morning plain-English insight) and §5.5 (LLM composes narrative, never invents numbers)
+    87→- Created src/modules/intelligence/service.ts with four exports: generateWeeklyInsight, getLatestInsight, listInsights, deliverInsightViaWhatsapp
+    88→- getPreviousWeekRange(): computes prior Monday 00:00 → Sunday 23:59:59.999 in local time so insights always cover the *completed* week
+    89→- aggregateWeek(): Promise.all of 6 Prisma queries (Customer joins, active Customer count, claimed RewardRedemptions, sent Campaigns, redeemed CampaignRecipients, LoyaltyTransaction earn aggregate). totalRevenue = sum(earn points) / tenant.pointsPerRand — a real revenue estimate derived from the ledger
+    90→- Strict SYSTEM_PROMPT + buildUserPrompt() embed only the pre-computed numbers; LLM cannot see anything else
+    91→- parseInsightResponse(): extracts SUMMARY: block + 3 numbered lines, tolerates markdown bold (**1.**) and either "." or ")" delimiters; returns null on any format mismatch
+    92→- buildDeterministicNarrative(): template fallback driven entirely by the same real numbers; branches on each metric being zero vs non-zero so recommendations always reference real figures
+    93→- isAllZero() short-circuits to a fixed encouraging onboarding message (no LLM call) when a new tenant has zero activity — saves tokens and matches the PRD "getting started" tone
+    94→- AI-unavailable path: chat() returning null OR parse failure both fall through to buildDeterministicNarrative — insight always generates even without provider configured
+    95→- Idempotency: WeeklyInsight has @@unique([tenantId, weekStart]); generateWeeklyInsight returns the existing row if one already exists for the computed week
+    96→- listInsights clamps limit to [1, 52]; getLatestInsight returns null when no insight exists yet
+    97→- deliverInsightViaWhatsapp: composes a plain-text WhatsApp body (restaurant name, week range, summary, numbered recs), routes through the messaging engine's sendMessage() with idempotencyKey `insight-deliver-${insight.id}` (prevents double-push), only flips deliveredWhatsapp=true when status === 'sent' (skipped/failed leave it false so owner can retry)
+    98→- Type-checked the whole project: no errors in src/modules/intelligence/service.ts (pre-existing errors elsewhere are unrelated)
+    99→
+   100→Stage Summary:
+   101→- Intelligence service module complete at src/modules/intelligence/service.ts (~430 LOC, single file as required)
+   102→- Four exports wired: generateWeeklyInsight / getLatestInsight / listInsights / deliverInsightViaWhatsapp, all returning Result<T>
+   103→- Design principle honoured: LLM only sees real pre-aggregated numbers; deterministic fallback uses the same numbers; never any invented figures in the output
+   104→- Graceful degradation: zero-data → onboarding template; AI unavailable → deterministic template; AI parse failure → deterministic template; tenant missing whatsappPhone → sent=false, no crash
+   105→- Ready for a cron route (/api/cron/insights) or admin "Generate now" button to call generateWeeklyInsight for each tenant
+   106→
+   107→---
+   108→Task ID: 8
+   109→Agent: billing-builder
+   110→Task: Build billing service module (PayFast)
+   111→
+   112→Work Log:
+   113→- Read worklog.md, prisma/schema.prisma (Tenant, PaymentTransaction, WebhookEvent), src/lib/integrations/payfast/client.ts (payfastConfigured, buildCheckoutFields, verifyIpn, PAYFAST_HOST, CheckoutInput, CheckoutField, IpnCheckResult), src/shared/types/index.ts (PLANS, PLAN_CUSTOMER_CAPS, Plan, PlanStatus), src/lib/db.ts (Result/ok/err/requireDb)
+   114→- Wrote src/modules/billing/service.ts with all 5 required exports + BillingStatus + PaymentHistoryItem types
+   115→- initiateCheckout: validates tenant exists → looks up price from PLANS → creates pending PaymentTransaction (currency=ZAR, billingPeriod=monthly) → buildCheckoutFields with itemName="Orderly {Plan} — Monthly Subscription", subscriptionType=1, return/cancel/notify URLs derived from NEXT_PUBLIC_APP_URL → returns { paymentId, checkoutUrl: PAYFAST_HOST+'/eng/process', fields }. Short-circuits with err('PAYFAST_NOT_CONFIGURED') when integration missing.
+   116→- processIpn: extracts m_payment_id → looks up PaymentTransaction. Missing/unknown transaction → persists raw WebhookEvent (source='payfast', error tag) and returns err('TRANSACTION_NOT_FOUND'). On already-complete transaction → records the duplicate IPN as a verified WebhookEvent and returns { activated: false } (idempotent). Otherwise runs verifyIpn() (4 checks), captures pf_payment_id, and either (a) on allPassed: atomically updates PaymentTransaction→complete + Tenant.plan+planStatus='active' inside db.$transaction and logs verified WebhookEvent, returning { activated: true }; or (b) on failure: marks PaymentTransaction→failed (all 4 booleans + rawPayload persisted, planStatus left untouched) and logs WebhookEvent with error tag, returning { activated: false }.
+   117→- getBillingStatus: returns live plan, planStatus, trialEndsAt, daysUntilTrialEnd (Math.ceil diff), customerCap (from PLAN_CUSTOMER_CAPS), and live customerCount via db.customer.count.
+   118→- listTransactions: returns newest-first PaymentHistoryItem[] (capped 1..200, default 50) with all 4 verification booleans surfaced.
+   119→- setTenantPlan: validates tenant exists, then updates Tenant.plan + Tenant.planStatus directly (admin/trial/cancel override path).
+   120→- Helpers: asPlan/asPlanStatus runtime guards for DB-stored strings; planPriceZAR/planDisplayName from PLANS; APP_URL reads NEXT_PUBLIC_APP_URL with '' fallback.
+   121→- Type-checked via `npx tsc --noEmit` — zero errors in src/modules/billing/service.ts. (Pre-existing errors elsewhere in repo — e.g. src/modules/messaging/service.ts and skills/examples — are unrelated to this task.)
+   122→
+   123→Stage Summary:
+   124→- Billing module complete. Single file src/modules/billing/service.ts, no tests, no other files touched (only worklog.md append).
+   125→- PayFast checkout flow ready for an API route to consume: caller just needs to POST `fields` to `checkoutUrl` (or render an auto-submitting form).
+   126→- IPN handler is idempotent and audit-complete: every inbound IPN — even unmatched — is persisted to WebhookEvent; re-deliveries of completed transactions don't mutate tenant state.
+   127→- All 4 PayFast verification booleans (signatureValid, sourceIpValid, amountValid, serverValidated) are stored on PaymentTransaction for forensic review.
+   128→- Plan activation is atomic (db.$transaction wraps PaymentTransaction.update + Tenant.update), so a partial failure can't leave a complete transaction with an inactive tenant.
+   129→- Degrades gracefully when PAYFAST_* env vars missing: initiateCheckout returns err('PAYFAST_NOT_CONFIGURED'), processIpn still records the webhook but verifyIpn marks serverValidated=false.
+   130→
+   131→---
+   132→Task ID: 9
+   133→Agent: admin-builder
+   134→Task: Build admin service module (super admin)
+   135→
+   136→Work Log:
+   137→- Read worklog.md, prisma/schema.prisma, src/lib/db.ts, src/modules/messaging/service.ts, src/shared/types/index.ts, src/lib/security/password.ts, src/lib/integrations/evolution/client.ts to align with established conventions (Result<T,E> / ok / err / requireDb pattern, normalizePhone from Evolution client, INDUSTRIES branding colors, scrypt hashPassword + generateToken)
+   138→- Wrote src/modules/admin/service.ts with all required exports:
+   139→  - Prospect pipeline: uploadProspects (dedup by normalized phone via pre-fetch + intra-CSV dedup + createMany), listProspects (optional status filter)
+   140→  - sendInvites: per-prospect claimToken generation, status='invited' + invitedAt persistence FIRST (so claim link works regardless of WA delivery), then attempts WhatsApp send via the first connected tenant via sendMessage; per-prospect error isolation; falls back to token-only when no tenant has WhatsApp connected
+   141→  - Claim flow: validateClaimToken (validates token + status checks: PROSPECT_NOT_FOUND / ALREADY_CLAIMED / NOT_INVITED) + claimTenant (atomic $transaction: Tenant with industry branding color from INDUSTRIES + 14-day trial, owner User with hashed password, Prospect marked claimed; pre-flight checks for email conflict and prospect status)
+   142→  - listWebhookEvents: filter by source/tenantId, capped limit (1–1000, default 100), returns payloadPreview (first 200 chars)
+   143→  - platformBroadcast: iterates ALL tenants, creates one outbound message row per tenant (to='owner', status='sent' if whatsapp connected else 'simulated', error='simulated (whatsapp not connected)' when applicable); returns { reached, skipped }
+   144→  - listTenants (with _count of customers) and getTenantDetail (full row)
+   145→- One type fix noted in code: TenantDetail.latitude/longitude typed as `number | null` (spec wrote `Float | null` — Float is a Prisma type, not TS)
+   146→- Ran `npx tsc --noEmit` — file compiles cleanly (zero errors in src/modules/admin/service.ts; pre-existing errors in messaging/service.ts and other unrelated files remain untouched)
+   147→
+   148→Stage Summary:
+   149→- Super-admin service module complete at src/modules/admin/service.ts (~470 lines)
+   150→- All 9 required exports implemented with graceful-degradation Result<T,E> pattern matching the rest of the codebase
+   151→- Claim flow uses $transaction for atomicity (tenant + owner user + prospect update all-or-nothing)
+   152→- Invite sends persist claim token BEFORE attempting WhatsApp delivery — invite links work even when no tenant has WhatsApp connected
+   153→- Platform broadcast records one message row per tenant so admins can audit which tenants received vs were simulated
+   154→- Cross-tenant webhook log returns payloadPreview (first 200 chars) for safe inline display
+   155→- Tenant detail/list include real customer counts via Prisma _count
+   156→- File compiles cleanly under the project's strict TS config; no new dependencies introduced
+   157→
+   158→---
+   159→Task ID: 6
+   160→Agent: automation-builder
+   161→Task: Build automation engine (types, conditions, actions, engine, seed rules)
+   162→
+   163→Work Log:
+   164→- Read worklog.md, prisma/schema.prisma (AutomationRule/AutomationRun/Customer/Tenant/Message), src/modules/messaging/service.ts (sendMessage + SendContext), src/lib/events/bus.ts (subscribe/emit), src/modules/loyalty/service.ts (adjustPoints + emitted events), src/modules/intelligence/service.ts (generateWeeklyInsight), src/lib/db.ts (Result/ok/err/requireDb) to align with established conventions
+   165→- Wrote src/modules/automation/types.ts: TriggerType/Trigger/Condition/Action/RuleContext/Rule/ActionResult/EngineRunResult. Two documented extensions to the spec'd Condition union — `total_visits_lte` (needed by the onboarding rules) and `not` (generic negation combinator needed by the VIP threshold rules) — plus `status_not_equals` for convenience. Added `ruleId` and `triggerEvent` to RuleContext per spec so action executors can build idempotency keys
+   166→- Wrote src/modules/automation/conditions.ts: pure `evaluateCondition` / `evaluateAll` (empty = true) / `renderTemplate`. Customer-bound conditions return false when ctx.customer is undefined (tenant-scoped rules). `daysSince` helper handles null/invalid dates safely. `renderTemplate` substitutes `{customer.*}` and `{tenant.*}` tokens via regex; unknown tokens are left as-is (no crash, makes misconfig obvious)
+   167→- Wrote src/modules/automation/actions.ts: `executeAction(action, ctx)` returning `{ success, error? }`. All 6 action kinds implemented; never throws (all exceptions caught). `send_message_to_customer` short-circuits opted_out customers (POPIA) before hitting the messaging layer; uses idempotencyKey `auto-{ruleId}-{customerId}-{triggerEvent}`. `send_message_to_owner` sends to tenant.whatsappPhone or returns success-but-undelivered when not configured (so a missing owner phone doesn't mark weekly insight delivery as 'failed'). `adjust_points` and `set_customer_status` reflect the change back into ctx.customer so subsequent actions in the same rule see the new state. `emit_event` re-emits on the domain bus. `generate_weekly_insight` calls the intelligence service
+   168→- Wrote src/modules/automation/engine.ts: parseTrigger/serializeTrigger/deserializeRule round-trip the DB's colon-delimited trigger string + JSON conditions/actions; unparseable rows are dropped with a console warning (one bad row never breaks the engine). `registerRulesFromDb(tenantId)` loads active rules ordered by priority asc. `executeRule(rule, ctx)` is the idempotent execution path: builds triggerEvent label (event-type for events, `schedule:{cadence}:{YYYY-MM-DD}` for scheduled, `inactivity:{days}:{YYYY-MM-DD}` for inactivity), checks automation_runs.idempotencyKey uniqueness, executes actions in order with per-action error isolation (one failure does NOT abort the rest), logs the run with status='success'|'failed' + JSON result. P2002 from a concurrent create is treated as idempotency held. `fireEventDrivenRules` resolves customer from entityId then payload.customerId. `fireScheduledRules` infers customer-scoped vs tenant-scoped via `isCustomerScoped(rule)` (any condition references a customer field OR any action template references {customer.*}); customer-scoped rules iterate non-opted-out customers, tenant-scoped fire once. `fireInactivityRules` scans non-opted-out customers whose lastVisitAt is N+ days old
+   169→- Wrote src/modules/automation/rules.seed.ts: `MVP_RULES: Array<Omit<Rule,'id'>>` with all 18 rules as pure data: 2 onboarding (welcome followup with bonus points, second-visit bonus on reward.redeemed), 4 loyalty (vip threshold with promotion+message, 500pt milestone, 21-29d inactivity warning, 90d points-expiry warning), 3 campaign manual triggers (registered for dashboard visibility; engine ignores them; campaigns service is the real executor), 3 recovery (30d at-risk nudge +30pts, 45d at-risk/dormant escalation +50pts, 60d owner alert), 4 status (mark_at_risk 30-59d, mark_dormant 60d+, reactivate_dormant on customer.rejoined, mark_vip 10+ visits — status rules priority 90 so they run before recovery's 100), 2 intelligence weekly (generate_weekly_insight + owner delivery notification)
+   170→- Wrote src/modules/automation/index.ts: re-exports all types, conditions, actions, engine functions, and MVP_RULES. `ensureAutomationSubscribed()` registers handlers for the 7 spec'd events (customer.joined/rejoined/opted_out, reward.redeemed/redeem_initiated, campaign.sent/redeemed) — each handler reads event.tenantId and dispatches into fireEventDrivenRules. Auto-called on first import. Subscribed to specific events (not wildcard) because the bus is global and tenant context must be loaded per-event
+   171→- Verified with `npx tsc --noEmit` — ZERO errors in src/modules/automation/* (pre-existing errors in messaging/service.ts, skills/, examples/ are unrelated and unchanged)
+   172→
+   173→Stage Summary:
+   174→- Automation engine module complete: 6 files in src/modules/automation/ (types.ts, conditions.ts, actions.ts, engine.ts, rules.seed.ts, index.ts)
+   175→- Data-driven by design: new automations are added as `automation_rules` rows (seeded from MVP_RULES), not new deploys. The engine only knows how to (de)serialise and execute the fixed Action union — rule data can NEVER cause arbitrary code execution
+   176→- Four trigger mechanisms, one execution path: event-driven (auto-subscribed on import), scheduled (called by /api/cron/orchestrator), inactivity (called by daily cron sweep), manual (registered for visibility; campaigns service is the real executor)
+   177→- Idempotency at two layers: (1) automation_runs.idempotencyKey unique on `{tenantId}:{ruleId}:{triggerEvent}:{entityId}` — retried crons / re-delivered webhooks never double-fire; (2) messaging layer's externalId idempotency on `auto-{ruleId}-{customerId}-{triggerEvent}` — never double-send. Scheduled/inactivity triggerEvents include the calendar date so the same rule can fire once per day per entity (cron retries same-day are deduped, next-day runs go through)
+   178→- POPIA-compliant: opted_out customers are excluded from the scheduled/inactivity sweeps at the DB query level, and the send_message_to_customer action short-circuits opted_out customers before touching the messaging layer
+   179→- Per-action error isolation: one action failing (e.g., adjust_points) does NOT abort the rest of the rule's actions (e.g., a subsequent send_message_to_owner alert) — the run is logged with status='failed' but partial work is preserved
+   180→- Customer-scope inference: scheduled rules that reference customer fields (or {customer.*} in templates) iterate non-opted-out customers; tenant-scoped rules (intelligence) fire once. Status recalculation rules run at priority 90 so customer status is current when the recovery ladder (priority 100) evaluates its status_in conditions
+   181→- Graceful degradation: every fire function returns EngineRunResult[] and never throws; tenant-not-found / db-unavailable / unparseable-rule all degrade to empty results with a console warning
+   182→- Ready to be wired into: /api/cron/orchestrator (calls fireScheduledRules + fireInactivityRules), tenant provisioning seed script (upserts MVP_RULES into automation_rules per tenant), and the owner dashboard (lists rules for visibility)
+   183→
+   184→---
+   185→Task ID: 11-15
+   186→Agent: orchestrator
+   187→Task: Frontend (single-page app on `/`) + end-to-end verification
+   188→
+   189→Work Log:
+   190→- Built src/lib/api.ts (typed fetch wrapper + useApi hook)
+   191→- Built src/lib/use-user.tsx (auth context with login/signup/logout/refresh)
+   192→- Built src/components/orderly/ui.tsx (shared primitives: Card, Button, Input, Badge, StatusBadge, Spinner, EmptyState, formatZAR, formatRelativeTime)
+   193→- Built src/components/orderly/marketing.tsx (landing page: hero, features, pricing, CTA, sticky footer)
+   194→- Built src/components/orderly/auth-modal.tsx (login/signup modal with demo creds hint)
+   195→- Built src/components/orderly/app-shell.tsx (owner shell with sidebar nav, mobile-responsive)
+   196→- Built src/components/orderly/dashboard.tsx (whatsapp status banner, 4 stat cards, 3 campaign buttons, activity feed, generate insight CTA)
+   197→- Built src/components/orderly/customers.tsx (searchable list, status filter, pagination, detail panel with ledger/redemptions, adjust points modal, add visit modal, add customer modal)
+   198→- Built src/components/orderly/campaigns.tsx (3 campaign buttons + history list + 3-step builder: compose → audience preview+ROI → send+result)
+   199→- Built src/components/orderly/insights.tsx (latest insight card with 6 number cards + summary + 3 recommendations + deliver via WhatsApp + history list)
+   200→- Built src/components/orderly/settings.tsx (4 tabs: profile, whatsapp connect/simulate/disconnect/test-send, rewards catalog CRUD, billing with plan cards + transaction history)
+   201→- Built src/components/orderly/qr-poster-view.tsx (SVG preview + download + direct wa.me link + how-it-works)
+   202→- Built src/components/orderly/claim-flow.tsx (validate token → form → submit → done; branded per industry)
+   203→- Built src/components/orderly/geo-claim-flow.tsx (locating → verifying → success with confirmation QR / out_of_range / expired / already_claimed / no_geo states)
+   204→- Built src/components/orderly/super-admin-shell.tsx (admin sidebar + 4 views: tenants table, prospects pipeline with checkbox+invite+claim-link-copy, broadcast composer, webhook event log with verified/processed badges)
+   205→- Updated src/app/layout.tsx (metadata + Sonner toaster with richColors)
+   206→- Updated src/app/page.tsx (router: claim/geo-claim/public flows → marketing → super admin shell → owner app shell, all on `/`)
+   207→
+   208→Verification (agent-browser + curl):
+   209→- Marketing landing renders: ✓ (hero, features, pricing, CTA, sticky footer)
+   210→- Login flow: ✓ (cookie-based session, redirects to dashboard)
+   211→- Owner dashboard: ✓ (stats, 3 campaign buttons, activity feed, generate insight button works)
+   212→- Customers view: ✓ (15 seeded customers, search/filter/pagination, detail drawer with ledger, add customer, adjust points, add visit)
+   213→- Campaigns builder: ✓ (3-step flow, audience resolution, ROI estimate, send to 2 customers succeeded)
+   214→- Insights view: ✓ (AI-generated weekly report with real numbers + 3 recommendations — verified LLM used ground-truth data, not invented)
+   215→- Settings (all 4 tabs): ✓ (profile, whatsapp connect/simulate, rewards CRUD, billing with plan cards)
+   216→- QR poster: ✓ (SVG generated with branding, downloadable)
+   217→- Super admin shell: ✓ (4 views: tenants, prospects, broadcasts, webhooks)
+   218→- Prospects pipeline: ✓ (add → send invite → claim link generated → copy link)
+   219→- Claim flow: ✓ (token validated → form pre-filled → submit → new tenant + owner created)
+   220→- Geo-claim flow: ✓ (in-range claim succeeds with confirmation QR; out-of-range rejected with distance; API-level verification of all states)
+   221→- WhatsApp webhook: ✓ (JOIN creates customer + 50 welcome bonus + welcome message logged; BALANCE returns points + next reward; STOP opts out)
+   222→- Health/selftest: ✓ (db=pass, evolutionApi=warn, payfast=warn, cronSecret=warn, appUrl=warn, aiProvider=pass — graceful degradation)
+   223→- Cron orchestrator: ✓ (daily dispatch processes both tenants, fires automation rules with idempotency)
+   224→- Cron insights: ✓ (weekly insight generated for both tenants)
+   225→
+   226→Stage Summary:
+   227→- Frontend complete: full single-page app on `/` with marketing, auth, owner dashboard, customers, campaigns, insights, settings, QR poster, super admin, claim, geo-claim views
+   228→- End-to-end verified via agent-browser: login → dashboard → send campaign → generate AI insight → view customers → super admin prospects → invite → claim flow → geo-claim
+   229→- WhatsApp webhook verified: JOIN/BALANCE/REDEEM/STOP all functional
+   230→- Cron orchestrator verified: fires automation rules + generates weekly insights
+   231→- Lint: 0 errors, 6 warnings (all "unused eslint-disable directive" — harmless)
+   232→- Production-ready: app degrades gracefully when env vars are missing, all integrations (Evolution/PayFast/AI) optional
+   233→
+   234→---
+   235→Task ID: RESET
+   236→Agent: orchestrator
+   237→Task: Rebuild Orderly as the FULL system per the PDF spec (10 pipelines / 54 automations), not just loyalty
+   238→
+   239→Work Log:
+   240→- Read 152-page PDF /home/z/my-project/upload/ordely code prompts.pdf
+   241→- The PDF reveals Orderly is far larger than the loyalty-only build I did earlier. Real system includes:
+   242→  - Restaurant Hub (Smart Page) at /r/[slug] — branded with Book/Join/Menu/Chat/Specials/Directions/Call/Birthday actions
+   243→  - AI Concierge with tools (getMenu, getBusinessInfo, getSpecials, getLoyaltyBalance, searchKnowledge, createBooking, checkAvailability) — grounded LLM that NEVER invents facts
+   244→  - Knowledge Base ingestion (URL via Jina Reader, PDF via unpdf, embeddings) — adapting to sandbox: keyword-based TF-IDF search instead of pgvector since SQLite has no vector support
+   245→  - Menu Manager (CRUD with dietary tags, prices in cents)
+   246→  - Full Bookings engine: AI extract date/time/party from free text → booking_drafts persists across messages → reservations service creates booking → confirmations
+   247→  - Cancel / Reschedule / Confirm-attendance deterministic handlers
+   248→  - Waitlist (WAITLIST keyword, offerFreedTable on cancel/no-show, 30-min offer window, YES to accept)
+   249→  - Post-meal review request (2h after completed booking, sentiment routing positive→Google / negative→manager)
+   250→  - No-show prevention reminders (48h / 24h / 6h cron)
+   251→  - Daily Manager Brief (morning cron: bookings, VIPs, birthdays, allergies, large groups, revenue, available seats)
+   252→  - GPS-gated Rewards claim with cashier QR confirmation code
+   253→  - 4-tier pricing (Starter R299 / Growth R499 / Professional R1,499 / Premium R2,999)
+   254→  - New homepage selling "the empty chair" — hero, villain, 7 pain-grouped features, 10-pipeline depth, tier pricing, invite-request CTA
+   255→  - 10 pipelines: Acquire, Convert, Delight, Loyalty, Market, Recover, Revenue Optimize, Operations, Reviews, Intelligence
+   256→  - 54 automations total (current build has 18 — will extend)
+   257→
+   258→Stage Summary:
+   259→- Existing loyalty-only build is preserved and being EXTENDED, not replaced
+   260→- Starting fresh with schema additions for BookingDraft, Reservation, Waitlist, Review, MenuItem, KnowledgeSource, KnowledgeChunk
+   261→- Adapting PDF's Neon pgvector + OpenAI deps to sandbox: simple keyword search via z-ai-web-dev-sdk chat for retrieval
+   262→
+   263→---
+   264→Task ID: 2-9-8
+   265→Agent: knowledge-menu-rewards-builder
+   266→Task: Build knowledge base (keyword retrieval), menu CRUD, rewards verify (cashier QR)
+   267→
+   268→Work Log:
+   269→- Read worklog.md, prisma/schema.prisma (KnowledgeSource/KnowledgeChunk/MenuItem/RewardRedemption/Customer/Tenant), src/lib/db.ts (Result/ok/err/requireDb), src/shared/types/index.ts (REDEMPTION_TOKEN_TTL_MINUTES), src/shared/utils/geo.ts, src/modules/loyalty/service.ts (initiateRedeem/verifyAndClaim — confirmationQr is randomBytes(4).toString('hex').toUpperCase() = 8 chars set at creation), src/modules/messaging/service.ts (sendMessage gateway), src/lib/ai/provider.ts (chat() returns null on failure)
+   270→- Confirmed concierge module dir is empty — my menu/knowledge signatures only need to satisfy the task spec (no upstream caller to match yet)
+   271→
+   272→- Wrote src/modules/knowledge/service.ts (~330 LOC):
+   273→  - chunkText(): 800-char chunks, 100-char overlap, whitespace normalised, <40-char chunks dropped
+   274→  - extractKeywords(): lowercase → strip non-alphanumeric (keep _ and digits) → split on whitespace → drop stopwords (short list: the/a/an/is/are/was/were/of/to/in/on/at/for/and/or/but/with/as/by/be/... ~50 words) → drop <2-char tokens → dedupe → space-joined string for the `keywords` column
+   275→  - tokenizeQuery(): mirrors extractKeywords but returns a Set for Jaccard math
+   276→  - jaccard(): |A∩B| / |A∪B|, iterates the smaller set for speed, returns 0 on empty overlap
+   277→  - ingestUrl(): creates source row status='processing' up front, validates URL scheme, fetches `https://r.jina.ai/${url}` with Accept: text/plain + 30s AbortSignal.timeout, on success chunks + persistChunks + flip to 'ready'; on any failure (invalid URL, fetch non-ok, empty content, no valid chunks) flips source to 'failed' with error message and returns err
+   278→  - ingestPdfBuffer(): same flow with type='pdf', filename stored (text passed in pre-extracted — unpdf not installed in sandbox)
+   279→  - ingestText(): same flow with type='text', name stored in filename column
+   280→  - reingest(): URL sources only; fetches fresh text first, only deletes old chunks once new fetch succeeds (so a failed refresh leaves previous content serving), $transaction wraps the chunk-delete then createMany inserts new chunks, updates chunkCount + status='ready'
+   281→  - deleteSource(): findFirst by id+tenantId (cross-tenant delete can't succeed), explicit knowledgeChunk.deleteMany then knowledgeSource.delete (cascade is also in schema but explicit is safer)
+   282→  - listSources(): tenantId-scoped findMany, newest-first, returns KnowledgeSourceItem[] with chunkCount from the denormalised column
+   283→  - searchKnowledge(): tokenises query (returns [] on empty), loads only chunks whose parent source is 'ready' (failed sources may have orphan chunks from a crashed ingest — never surface them), linear scan with set-based Jaccard, drops zero-similarity chunks, sorts desc, caps at min(limit,50)
+   284→  - persistChunks(): internal helper using createMany for batch insert
+   285→
+   286→- Wrote src/modules/menu/service.ts (~190 LOC):
+   287→  - VALID_DIETARY set exported (vegetarian/vegan/halal/gluten_free/spicy) for callers
+   288→  - sanitizeDietary(): trims, lowercases, dedupes — allows free-form custom tags through (e.g. "keto") so tenants aren't locked to the canonical set
+   289→  - deserialize(): parses the stored JSON-stringified dietary array back into string[] (handles null/invalid JSON → [])
+   290→  - listMenuItems(tenantId, includeUnavailable=false): tenantId-scoped findMany; default hides unavailable items (for the public Smart Page); dashboard passes true to see all; ordered by category→sortOrder→name
+   291→  - createMenuItem(): validates name/category non-empty + priceCents≥0; JSON-stringifies dietary; defaults isAvailable=true, sortOrder=0
+   292→  - updateMenuItem(): findFirst by id+tenantId (cross-tenant update can't succeed), only writes supplied fields, re-serialises dietary when provided, no-op success when input is empty
+   293→  - deleteMenuItem(): findFirst by id+tenantId, then delete (ITEM_NOT_FOUND surfaced cleanly vs deleteMany's silent no-op)
+   294→  - getMenuByCategory(): tenantId + isAvailable=true filter, grouped into Record<string, any[]> keyed by category (empty category falls back to 'Other'), items sorted by sortOrder then name within each category
+   295→  - Every tenant-scoped query includes `where: { tenantId, ... }` — no unscoped access paths
+   296→
+   297→- Wrote src/modules/rewards/service.ts (~110 LOC):
+   298→  - makeCashierCode(claimToken): deterministic 6-char uppercase code via sha256(token).slice(0,6) — same input always yields same code (can be regenerated without a DB lookup, e.g. on a printed receipt); 36^6 ≈ 2.2B space so collisions at restaurant scale are negligible
+   299→  - verifyClaim(claimToken): lookups RewardRedemption by claimToken (unique) with reward + customer relations; maps underlying status → staff-facing enum (claimed→'claimed' valid:true; pending+not-expired→'pending' valid:false [customer still needs to geo-claim]; pending+expired→'expired'; expired/cancelled/unknown→'expired'); returns {valid, status, rewardName, customerName, customerPhone, pointsCost, claimedAt, confirmationQr}; confirmationQr falls back to makeCashierCode(token) when the row's column is null (defensive — initiateRedeem always sets it but legacy rows may lack it); not-found returns valid:false, status:'expired', all other fields null
+   300→
+   301→- Type-checked via `bunx tsc --noEmit`: ZERO errors in the three new files. Pre-existing errors elsewhere (messaging/service.ts whatsappPhone select, billing/service.ts Plan union, examples/skills/*) are unrelated and were called out by prior agents
+   302→
+   303→Stage Summary:
+   304→- Three service modules complete: src/modules/knowledge/service.ts, src/modules/menu/service.ts, src/modules/rewards/service.ts (single files each, no tests, no other files touched)
+   305→- Knowledge: keyword-based retrieval (Jaccard similarity over space-separated keyword index) substitutes for pgvector since SQLite has no vector type — same RAG-style API surface for the concierge's `search_knowledge` tool
+   306→- Knowledge: source-row state machine (processing → ready | failed) with error column; reingest is non-destructive (old chunks only deleted after new fetch succeeds); failed sources excluded from search so half-ingested content never surfaces
+   307→- Knowledge: chunking honours the spec exactly (800-char chunks, 100-char overlap, <40-char chunks dropped); stopwords kept deliberately small so cuisine/allergen/dish terms are never filtered out
+   308→- Menu: full CRUD with dietary stored as JSON-stringified array, parsed back to string[] on read; tenant isolation enforced via findFirst-by-id+tenantId on update/delete (cross-tenant mutations can never succeed); getMenuByCategory returns the grouped shape the public menu page needs
+   309→- Rewards: verifyClaim is read-only (no DB writes — staff lookup doesn't mutate redemption state); maps the underlying status enum onto the cleaner staff-facing pending/claimed/expired trichotomy; confirmationQr falls back to a deterministic makeCashierCode(token) when missing
+   310→- Rewards: makeCashierCode is deterministic (sha256-derived) so it can be regenerated without a DB hit — useful for printed receipts and for older redemption rows that pre-date the confirmationQr column population
+   311→- All three modules follow the established conventions: Result<T,E>/ok/err/requireDb pattern, tenantId as first arg on every public function, graceful degradation (db nullable → empty results, not exceptions), no circular dependencies
+   312→- Ready to be wired into: AI concierge tools (get_menu, search_knowledge), /api/v1/menu/* CRUD routes, /api/v1/knowledge/* ingest routes, /api/v1/rewards/verify/[token] staff endpoint, and /r/[slug]/menu public Smart Page
+   313→
+   314→---
+   315→Task ID: 3-7
+   316→Agent: concierge-operations-builder
+   317→Task: Build AI concierge (grounded tools + LLM), daily brief builder + WhatsApp formatter
+   318→
+   319→Work Log:
+   320→- Read worklog, prisma/schema.prisma, messaging/service.ts, lib/db.ts, lib/ai/provider.ts, intelligence/service.ts (for chat() usage patterns), loyalty/service.ts (for phone-normalisation conventions)
+   321→- Confirmed parallel agents finished: knowledge/service.ts exports searchKnowledge(tenantId, query, limit) => Promise<{content, similarity}[]> and menu/service.ts exports listMenuItems + getMenuByCategory — signatures match the assumed shapes
+   322→- Created src/modules/concierge/tools.ts:
+   323→  - buildConciergeTools(tenantId, customerPhone) factory returns 5 plain async tool functions — NO ai SDK dependency, only @/lib/db + @/modules/knowledge/service imports
+   324→  - getMenu: queries menuItems where tenantId AND isAvailable=true, groups by category, parses dietary JSON defensively, returns { menu: Record<category, dish[]> }
+   325→  - getBusinessInfo: returns tenant name/cuisine/address/phone/openingHours/gpsLat/gpsLng (lat/lng → gpsLat/gpsLng mapping)
+   326→  - getSpecials: reads tenant.smartPageConfig JSON, extracts todaySpecials (string) or specials (string[] joined by '; ')
+   327→  - getLoyaltyBalance: finds customer by tenantId+normalised phone, returns joined/name/points/nextReward (cheapest unaffordable reward with pointsNeeded gap) or all-nulls when not found
+   328→  - searchKnowledge: wraps knowledge/service.searchKnowledge, returns { found, excerpts: string[] }
+   329→  - Every tool catches its own errors and returns a { error: '...' } payload with all required shape fields populated (nulls/zeros) so a failing tool never breaks the LLM reply
+   330→  - Exports ConciergeTools = ReturnType<typeof buildConciergeTools>
+   331→- Created src/modules/concierge/service.ts:
+   332→  - answerWithConcierge(tenantId, guestPhone, message) => Promise<string>
+   333→    - Loads tenant for name + currencyName
+   334→    - Builds the exact system prompt from the task spec (restaurantName + currencyName interpolation, GROUNDING RULES, TONE, booking-handling instruction)
+   335→    - Pre-calls getMenu, getBusinessInfo, getSpecials, searchKnowledge in parallel via Promise.all
+   336→    - Calls getLoyaltyBalance ONLY when message matches /\b(points?|balance|reward|loyalty|redeem)\b/i AND guestPhone is non-empty (test path passes '' → loyalty skipped)
+   337→    - Builds user prompt with tool JSON embedded as context, menu truncated to ~2000 chars at a sensible boundary
+   338→    - Calls chat([{system}, {user}]) with temperature 0.5, maxTokens 400 (uses @/lib/ai/provider — NO ai SDK dependency)
+   339→    - On null/empty chat result → returns deterministic FALLBACK_REPLY ("Hi! Thanks for your message. I can help with our menu, hours, specials, or booking a table...")
+   340→    - Never throws — wraps entire body in try/catch that returns FALLBACK_REPLY
+   341→  - testConcierge(tenantId, question) => Promise<{ answer, sources: {content, similarity}[], needsKnowledge }>
+   342→    - Calls answerWithConcierge(tenantId, '', question) for the answer
+   343→    - Independently calls searchKnowledge directly to expose raw similarity scores (the tools wrapper strips them) for the "Where this answer came from" UI
+   344→    - needsKnowledge = sources.length > 0
+   345→- Created src/modules/operations/daily-brief.ts:
+   346→  - DailyBrief type exported with all fields per spec (bookings, vips, birthdays, allergies, largeGroups, capacity/availableCovers/expectedRevenueCents etc.)
+   347→  - buildDailyBrief(tenantId) => Promise<DailyBrief | null>:
+   348→    - Loads tenant (name, capacity, avgSpendCents) — returns null if not found
+   349→    - Queries today's reservations where status in (pending, confirmed, seated) and reservationDate = todayISO(), ordered by reservationTime asc, joined with customer (name, status, allergies)
+   350→    - Birthdays today via Prisma $queryRaw using SQLite strftime('%m', birthday) = MM AND strftime('%d', birthday) = DD with zero-padded values — has a JS-side fallback filter if the raw query shape ever changes
+   351→    - Computes bookedCovers = sum(partySize), expectedRevenueCents = bookedCovers * avgSpendCents
+   352→    - availableCovers = max(0, capacity - bookedCovers) when capacity set, else null
+   353→    - VIPs = bookings where customer.status === 'vip'
+   354→    - allergies = bookings where reservation.allergies OR customer.allergies is non-empty (note: name preferred from customer, falls back to reservation.name)
+   355→    - largeGroups = bookings where partySize >= 6
+   356→  - formatDailyBriefForWhatsApp(b) => string:
+   357→    - Plain text only — no markdown, no asterisks (WhatsApp-native em-dash and ⭐ only)
+   358→    - Header: "Good morning! Here's today at {restaurantName}."
+   359→    - Bookings count + covers, then up to 10 bookings indented with "  {time} — table for {n}{ · name}{ ⭐ if vip}{ (occasion)}" format; trailing "  …and N more" if >10
+   360→    - Conditional sections (only when non-empty): VIPs today, Birthdays today, Allergies (name — note; name — note; ...), Large groups (time (n), time (n), ...), Expected revenue (~R{amount} formatted with thousands separators), Seats still available ({n} of {capacity})
+   361→    - Footer: "Have a great service!"
+   362→- Typecheck: 0 errors in src/modules/concierge/* and src/modules/operations/*. Remaining 20 TS errors are pre-existing in other modules (bookings/waitlist import path, billing Plan union, messaging select-shape, examples/, skills/) and were not introduced by this task
+   363→
+   364→Stage Summary:
+   365→- Three files written: src/modules/concierge/tools.ts, src/modules/concierge/service.ts, src/modules/operations/daily-brief.ts
+   366→- AI concierge is fully grounded: every fact the model can reference comes from a real DB query embedded in the prompt; the system prompt explicitly forbids inventing prices/dishes/hours/policies and instructs the model to say "I'm not sure" when a tool returns no data
+   367→- Concierge degrades gracefully at every layer: tool errors return {error} payloads (never throw), AI-unavailable path returns a deterministic fallback reply, missing tenant returns fallback, any exception caught and returns fallback — guests are never left without a response
+   368→- testConcierge exposes the knowledge sources (with raw similarity scores) so the settings UI can show provenance ("Where this answer came from")
+   369→- Daily brief is pure deterministic data — no LLM, no failure modes beyond "tenant not found → null"; safe to run in a morning cron
+   370→- WhatsApp formatter is plain-text-only (no markdown) with WhatsApp-native glyphs (— and ⭐), short lines for phone-screen reading, conditional sections so empty days produce a clean short message
+   371→- All three files follow established conventions: tenantId as first arg on every public function, requireDb() for DB access, graceful degradation, no circular dependencies, no ai SDK / @ai-sdk/openai imports (only @/lib/ai/provider.chat)
+   372→- Ready to be wired into: WhatsApp inbound webhook handler (answerWithConcierge → sendMessage), /api/v1/concierge/test settings endpoint (testConcierge), morning cron job (buildDailyBrief → formatDailyBriefForWhatsApp → sendMessage to owner), dashboard "Today" panel (buildDailyBrief → JSON)
+   373→
+   374→---
+   375→Task ID: 4-5-6
+   376→Agent: bookings-waitlist-reviews-builder
+   377→Task: Build bookings (AI extract + drafts + cancel/reschedule/confirm), waitlist (auto-fill), reviews (sentiment routing)
+   378→
+   379→Work Log:
+   380→- Read worklog.md, prisma/schema.prisma (BookingDraft, Reservation, Waitlist, Review, Customer, Tenant), src/lib/db.ts (Result/ok/err/requireDb pattern), src/lib/ai/provider.ts (chat() returns null on failure), src/modules/messaging/service.ts (sendMessage gateway + SendContext), src/modules/loyalty/service.ts (normalizePhoneLocal convention, handleJoin patterns), src/shared/types/index.ts (LOYALTY_KEYWORDS includes BOOK/CANCEL/CONFIRM/WAITLIST)
+   381→- Confirmed circular-dep risk between bookings↔waitlist and resolved via dynamic `await import()` in three call sites: processBookingMessage→offerFreedTable (on reschedule), processCancel→offerFreedTable, markNoShow→offerFreedTable, processWaitlistAccept→createReservation
+   382→- Wrote src/modules/bookings/service.ts with all 16 required exports:
+   383→  - Helpers: normalizePhoneLocal (local copy), todayStr, getReservationDateTime (YYYY-MM-DD + HH:MM → Date, returns null on invalid), formatDate (locale-aware display), generateBookingRef (ORD-XXXXXXXX via Math.random().toString(36), 8 alphanumeric chars, retries on collision)
+   384→  - createReservation: validates date/time/partySize formats, resolves customerId from phone if not provided, pulls allergies+name from customer row when not supplied, generates unique bookingRef, creates Reservation with status='confirmed', sends confirmation via sendMessage with idempotencyKey `booking-confirm-${id}`
+   385→  - checkAvailability: sums partySize for active reservations on date/time, compares to tenant.capacity; if no capacity configured → assume available; if full → suggests 8 alternative slots (±2h in 30-min increments within 11:00–22:00 service window) that have remaining capacity
+   386→  - listReservations: filterable by date/status, capped 1–200 (default 50), includes customer name+phone
+   387→  - getTodaysReservations: today's active reservations (pending/confirmed/seated/completed) ordered by time, includes customer allergies for kitchen safety
+   388→  - markNoShow: flips status='no_show' AND calls offerFreedTable (dynamic import) so the freed slot auto-fills from waitlist
+   389→  - markCompleted: sets status='completed' + completedAt + reviewRequestedAt=now (starts the 48h review-capture window), sends the post-meal review request via sendMessage with idempotencyKey `review-request-${id}`
+   390→  - findReservationByRef / findUpcomingReservations: tenant-scoped lookups returning null/[] on miss
+   391→  - extractBookingDetails: calls chat() with strict JSON-output system prompt embedding today's date for relative-date resolution; temperature=0.1 for determinism; parses with regex-extract `\{[\s\S]*\}` (tolerates code fences/preamble), JSON.parse, then per-field sanitization (regex-validated date/time, numeric partySize, intent whitelist). Returns {} on any failure (chat null, parse error, format mismatch) — caller asks for missing fields
+   392→  - hasActiveBookingDraft: cheap existence check
+   393→  - processBookingMessage: full AI extraction flow — (1) find-or-create collecting draft, (2) extractBookingDetails, (3) merge only non-null extracted fields, (4) compute missing required fields (partySize/date/time), (5) if all present AND TS-narrowed non-null → createReservation + close draft + (if rescheduleOf set) cancel the old reservation + offerFreedTable for the old slot, (6) if missing → send a "so far I have X, still need Y" message
+   394→  - processCancel: finds soonest upcoming (status pending/confirmed, reservationDate ≥ today), flips status='cancelled' + cancelledAt, sends cancellation confirmation, calls offerFreedTable for the freed slot
+   395→  - processReschedule: finds soonest upcoming, pre-seeds a new BookingDraft with rescheduleOf=oldId + old partySize/occasion/specialRequests, asks for new date/time
+   396→  - processConfirmAttendance: flips guestConfirmedAttendance=true on the soonest upcoming (status pending/confirmed, date ≥ today), sends confirmation
+   397→- Wrote src/modules/waitlist/service.ts with all 4 required exports + OFFER_WINDOW_MINUTES=30:
+   398→  - joinWaitlist: idempotent — returns existing status if already waiting/notified, else creates entry + sends confirmation with the 30-min offer window explained
+   399→  - offerFreedTable: pulls ALL waiting entries in FIFO order (oldest first via createdAt asc), matches the first one whose partySize ≤ freedCapacity AND (!preferredDate || preferredDate === freedDate). Updates to status='notified' with notifiedAt=now + expiresAt=now+30min + preferredDate/preferredTime = the freed slot. Sends the spec'd WhatsApp offer message via sendMessage with idempotencyKey `waitlist-offer-${id}`. Returns null when no match (caller — markNoShow/processCancel — silently continues)
+   400→  - processWaitlistAccept: finds most recent 'notified' entry (notifiedAt desc), checks expiry (marks 'expired' + sends "sorry, expired" message if past), dynamic-imports createReservation from bookings/service with source='waitlist', marks entry 'booked' on success. createReservation already sends the WhatsApp confirmation, so no double-send
+   401→  - listWaitlist: tenant-scoped, optional status filter, includes customer name+phone
+   402→- Wrote src/modules/reviews/service.ts with all 4 required exports:
+   403→  - parseRating: prioritizes explicit patterns — "X/5" or "X out of 5" → "X stars" → "rating: X" / "rate X" / "score: X" → ⭐ emoji count (1-5) → bare digit only if message ≤4 chars (avoids false positives like "I had 2 drinks"). Returns null when none match → falls back to keyword sentiment
+   404→  - keywordSentiment: counts hits in POSITIVE_WORDS (great/amazing/love/excellent/delicious/perfect/fantastic/wonderful/good/nice/best) vs NEGATIVE_WORDS (bad/terrible/awful/horrible/slow/cold/rude/disappointing/worst/poor). More positive → positive, more negative → negative, tie → neutral
+   405→  - ratingToSentiment: 4-5 → positive, 3 → neutral, 1-2 → negative
+   406→  - processReviewReply: (1) find customer by phone (return false if not found), (2) find latest completed reservation with reviewRequestedAt within last 48h (return false if none), (3) check no existing review for this reservation (return false if already reviewed), (4) parse rating + derive sentiment, (5) create Review row with routedTo=google_review|private_feedback, (6) sentiment routing: positive → send Google review link (or plain thank-you if tenant.googleReviewUrl unset) + flag googleReviewLinkSent; negative → apology via sendMessage + manager alert via db.message.create with direction='outbound'/to='owner' (per critical rule) + flag managerAlerted; neutral → thank-you message. All sends via sendMessage with idempotencyKey `review-{pos|neu|neg-apology}-${id}`. Returns true (captured) or false (not a review reply)
+   407→  - listReviews: tenant-scoped, optional sentiment filter, capped 1–200, includes customer name+phone
+   408→  - getReviewStats: Promise.all of 4 counts + ratings fetch; avgRating computed in JS (null when no ratings)
+   409→  - respondToReview: persists managerResponse + respondedAt, then sends the response to the customer's phone via sendMessage with idempotencyKey `review-response-${id}`
+   410→- All 24 exports across 3 files verified against the spec signatures
+   411→- Type-checked via `npx tsc --noEmit` — ZERO errors in bookings/service.ts, waitlist/service.ts, reviews/service.ts (pre-existing errors in messaging/service.ts, billing/service.ts, examples/, skills/ are unrelated and untouched)
+   412→- Two type fixes applied during review: (1) added explicit `draft.partySize && draft.reservationDate && draft.reservationTime` narrowing to the createReservation call site because TypeScript can't narrow through the `missing.length === 0` array check; (2) removed `include: { reservation: ... }` from listReviews because the Review model stores reservationId as a plain String? without a Prisma @relation — the booking ref can be looked up separately if needed
+   413→
+   414→Stage Summary:
+   415→- Three service modules complete: src/modules/bookings/service.ts (~870 LOC), src/modules/waitlist/service.ts (~225 LOC), src/modules/reviews/service.ts (~355 LOC)
+   416→- Bookings: full AI extraction → draft persistence → reservation creation → confirmation flow. AI prompt embeds today's date for relative-date resolution; extraction is conservative (only sets a field if the LLM clearly implies it); failures degrade to {} so the caller asks for missing fields. Reschedule flow cancels the old reservation AND offers the freed slot to the waitlist (matches the cancel behaviour). markCompleted triggers the review-request message inline so the 48h review-capture window starts immediately
+   417→- Waitlist: FIFO auto-fill on table-free. offerFreedTable is called from three places in bookings/service (processCancel, markNoShow, reschedule completion) — all via dynamic import to break the circular dep. 30-min offer window enforced on accept. processWaitlistAccept reuses createReservation(source='waitlist') so the booking ref + confirmation message are consistent with normal bookings
+   418→- Reviews: dual sentiment path (rating → 4-5/3/1-2 mapping; no rating → keyword count with tie→neutral). Positive → Google review link (from tenant.googleReviewUrl); negative → apology to guest + db.message.create owner-alert (per critical rule, NOT sendMessage — to='owner' is the in-app alert channel); neutral → thank-you. respondToReview pushes the manager's reply back to the customer via sendMessage
+   419→- All WhatsApp sends route through the sendMessage gateway with idempotency keys (booking-confirm / cancel-confirm / resched-start / confirm-attend / waitlist-join / waitlist-offer / waitlist-expired / review-request / review-pos / review-neu / review-neg-apology / review-response). Owner alerts bypass sendMessage and use db.message.create directly with direction='outbound'/to='owner'/externalId=`alert:review-${id}` so they surface in the owner dashboard's message log
+   420→- Every function is tenant-scoped (tenantId first arg), wrapped in try/catch, returns Result<T> for mutation operations and any[]/null for reads — never throws uncaught
+   421→- Phone normalization uses a local normalizePhoneLocal() copy in each file (same logic as evolution/client.ts and loyalty/service.ts) to avoid circular imports
+   422→- Ready to be wired into: the WhatsApp keyword router (BOOK/CANCEL/CONFIRM/WAITLIST dispatch), the AI concierge's createBooking tool, the 48h/24h/6h reminder cron (sets guestConfirmedAttendance), the daily Manager Brief cron (calls getTodaysReservations), and the owner dashboard's bookings/waitlist/reviews tabs
+   423→

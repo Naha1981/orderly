@@ -51,6 +51,7 @@ model Prospect {
   email         String?
   industry      String   @default("restaurant")
   status        String   @default("pending") // pending | invited | claimed | rejected
+  source        String   @default("csv") // csv | homepage | referral
   claimToken    String?  @unique
   invitedAt     DateTime?
   claimedAt     DateTime?
@@ -67,13 +68,22 @@ model Tenant {
   id              String   @id @default(cuid())
   name            String
   industry        String   @default("restaurant") // restaurant | cafe | bar | bakery | fast_food
-  brandingColor   String   @default("#16a34a")
+  cuisine         String?  // e.g. "Italian", "Brazilian steakhouse"
+  brandingColor   String   @default("#e8722a")
   logoUrl         String?
   // Location for GPS-gated redemption
   address         String?
   latitude        Float?
   longitude       Float?
   geoRadiusMeters Int      @default(500)
+  // Operations
+  capacity        Int?     // total covers
+  avgSpendCents   Int      @default(25000) // average spend per cover in cents
+  openingHours    String?  // JSON string: { mon: "09:00-22:00", ... }
+  phone           String?
+  googleReviewUrl String?
+  // Smart Page config (JSON: { rating, tagline, todaySpecials })
+  smartPageConfig String?
   // WhatsApp connection state
   whatsappInstanceName  String?
   whatsappInstanceToken String?
@@ -81,15 +91,16 @@ model Tenant {
   whatsappStatus        String   @default("disconnected") // disconnected | connecting | connected | error
   whatsappQrCode        String?
   // Plan / billing
-  plan            String   @default("starter") // starter | growth
+  plan            String   @default("starter") // starter | growth | professional | premium
   planStatus      String   @default("trial") // trial | active | past_due | cancelled
   trialEndsAt     DateTime?
   // Loyalty config
   pointsPerVisit  Int      @default(10)
   pointsPerRand   Int      @default(1) // points earned per ZAR spent
   welcomeBonus    Int      @default(50)
+  currencyName    String   @default("Points") // display name for loyalty points
   currency        String   @default("ZAR")
-  // Slug for Smart Page (P2)
+  // Slug for Restaurant Hub
   slug            String?  @unique
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt @default(now())
@@ -107,6 +118,13 @@ model Tenant {
   weeklyInsights        WeeklyInsight[]
   webhookEvents         WebhookEvent[]
   paymentTransactions   PaymentTransaction[]
+  menuItems             MenuItem[]
+  knowledgeSources      KnowledgeSource[]
+  knowledgeChunks       KnowledgeChunk[]
+  reservations          Reservation[]
+  bookingDrafts         BookingDraft[]
+  waitlist              Waitlist[]
+  reviews               Review[]
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -127,7 +145,9 @@ model Customer {
   joinedAt      DateTime @default(now())
   consentAt     DateTime?
   optedOutAt    DateTime?
-  source        String?  // qr | link | instagram | tiktok | facebook | google | manual
+  source        String?  // hub | qr | whatsapp | instagram | tiktok | facebook | google | manual
+  birthday      DateTime?
+  allergies     String?  // free-text allergies/dietary notes
   notes         String?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt @default(now())
@@ -136,6 +156,10 @@ model Customer {
   rewardRedemptions   RewardRedemption[]
   campaignRecipients  CampaignRecipient[]
   messages            Message[]
+  reservations        Reservation[]
+  bookingDrafts       BookingDraft[]
+  waitlist            Waitlist[]
+  reviews             Review[]
 
   @@unique([tenantId, phone])
   @@index([tenantId, status])
@@ -410,5 +434,172 @@ model WeeklyInsight {
   createdAt       DateTime @default(now())
 
   @@unique([tenantId, weekStart])
+  @@index([tenantId, createdAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Menu (for AI concierge get_menu tool + /r/[slug]/menu page)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model MenuItem {
+  id           String   @id @default(cuid())
+  tenantId     String
+  tenant       Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  category     String
+  name         String
+  description  String?
+  priceCents   Int
+  dietary      String?  // JSON array: ["vegetarian","vegan","halal","gluten_free","spicy"]
+  isAvailable  Boolean  @default(true)
+  sortOrder    Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt @default(now())
+
+  @@index([tenantId, isAvailable])
+  @@index([tenantId, category])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Knowledge Base (for AI concierge search_knowledge tool / RAG)
+// pgvector not available in SQLite — using simple text chunks + keyword search
+// ─────────────────────────────────────────────────────────────────────────────
+
+model KnowledgeSource {
+  id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  type        String   // url | pdf | text
+  url         String?
+  filename    String?
+  status      String   @default("processing") // processing | ready | failed
+  error       String?
+  chunkCount  Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt @default(now())
+
+  chunks      KnowledgeChunk[]
+
+  @@index([tenantId, status])
+}
+
+model KnowledgeChunk {
+  id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sourceId    String
+  source      KnowledgeSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  content     String
+  // Simple keyword index for retrieval (no embeddings — would use pgvector in production)
+  keywords    String?  // space-separated lowercased significant words
+  createdAt   DateTime @default(now())
+
+  @@index([tenantId, sourceId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bookings (Reservations) + Booking Drafts (AI extraction state)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model BookingDraft {
+  id                String   @id @default(cuid())
+  tenantId          String
+  tenant            Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  phone             String
+  customerId        String?
+  customer          Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  partySize         Int?
+  reservationDate   String?  // YYYY-MM-DD
+  reservationTime   String?  // HH:MM
+  occasion          String?
+  specialRequests   String?
+  rescheduleOf      String?  // reservation id being rescheduled
+  status            String   @default("collecting") // collecting | completed | expired
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt @default(now())
+
+  @@index([tenantId, phone, status])
+  @@index([tenantId, status])
+}
+
+model Reservation {
+  id                      String   @id @default(cuid())
+  tenantId                String
+  tenant                  Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customerId              String?
+  customer                Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  phone                   String
+  name                    String?
+  partySize               Int
+  reservationDate         String   // YYYY-MM-DD
+  reservationTime         String   // HH:MM
+  occasion                String?
+  specialRequests         String?
+  allergies               String?
+  bookingRef              String   @unique
+  status                  String   @default("confirmed") // pending | confirmed | seated | completed | cancelled | no_show
+  source                  String   @default("concierge") // concierge | waitlist | manual | phone
+  guestConfirmedAttendance Boolean @default(false)
+  reminder48hSent         Boolean  @default(false)
+  reminder24hSent         Boolean  @default(false)
+  reminder6hSent          Boolean  @default(false)
+  reviewRequestedAt       DateTime?
+  completedAt             DateTime?
+  cancelledAt             DateTime?
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt @default(now())
+
+  @@index([tenantId, status])
+  @@index([tenantId, reservationDate])
+  @@index([tenantId, customerId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Waitlist (auto-fill when a table frees up)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Waitlist {
+  id              String   @id @default(cuid())
+  tenantId        String
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customerId      String?
+  customer        Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  name            String?
+  phone           String
+  partySize       Int      @default(2)
+  preferredDate   String?
+  preferredTime   String?
+  status          String   @default("waiting") // waiting | notified | booked | expired
+  notifiedAt      DateTime?
+  expiresAt       DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt @default(now())
+
+  @@index([tenantId, status])
+  @@index([tenantId, phone])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Reviews (post-meal feedback capture with sentiment routing)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Review {
+  id                    String   @id @default(cuid())
+  tenantId              String
+  tenant                Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customerId            String?
+  customer              Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  reservationId         String?
+  rating                Int?
+  sentiment             String?  // positive | neutral | negative
+  feedbackText          String?
+  aiSummary             String?
+  routedTo              String?  // google_review | private_feedback
+  googleReviewLinkSent  Boolean  @default(false)
+  managerAlerted        Boolean  @default(false)
+  managerResponse       String?
+  respondedAt           DateTime?
+  createdAt             DateTime @default(now())
+
+  @@index([tenantId, sentiment])
   @@index([tenantId, createdAt])
 }

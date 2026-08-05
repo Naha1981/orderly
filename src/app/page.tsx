@@ -10,6 +10,7 @@ import { AppShell } from '@/components/orderly/app-shell'
 import { SuperAdminShell } from '@/components/orderly/super-admin-shell'
 import { ClaimFlow } from '@/components/orderly/claim-flow'
 import { GeoClaimFlow } from '@/components/orderly/geo-claim-flow'
+import { HubView } from '@/components/orderly/hub-view'
 import { Spinner } from '@/components/orderly/ui'
 
 function Router() {
@@ -21,6 +22,14 @@ function Router() {
   const claimToken = searchParams.get('claim')
   const geoClaimToken = searchParams.get('geo-claim')
   const billingReturn = searchParams.get('billing')
+  const hubSlug = searchParams.get('hub')
+  const hubSrc = searchParams.get('src') ?? undefined
+
+  // Public Restaurant Hub — rendered BEFORE auth check (it's a public page).
+  // Format: /?hub=restaurant-slug (optionally &src=qr_poster)
+  if (hubSlug) {
+    return <HubView slug={hubSlug} src={hubSrc} />
+  }
 
   // Public flows
   if (claimToken) {

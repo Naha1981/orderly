@@ -32,9 +32,11 @@ import {
   CheckCircle2,
   AlertCircle,
   MapPin,
+  Brain,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { PLANS } from '@/shared/types'
+import { ConciergeSettings } from '@/components/orderly/concierge-settings'
 
 type Tenant = {
   id: string
@@ -75,22 +77,23 @@ type BillingStatus = {
 }
 
 export function SettingsView() {
-  const [tab, setTab] = useState<'profile' | 'whatsapp' | 'rewards' | 'billing'>('profile')
+  const [tab, setTab] = useState<'profile' | 'whatsapp' | 'rewards' | 'billing' | 'concierge'>('profile')
 
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold">Settings</h1>
-        <p className="text-sm text-muted-foreground">Manage your restaurant, WhatsApp, rewards, and billing.</p>
+        <p className="text-sm text-muted-foreground">Manage your restaurant, WhatsApp, rewards, billing, and AI concierge.</p>
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-1 border-b">
+      <div className="flex gap-1 border-b overflow-x-auto">
         {[
           { id: 'profile', label: 'Restaurant profile', icon: Building2 },
           { id: 'whatsapp', label: 'WhatsApp', icon: MessageCircle },
           { id: 'rewards', label: 'Rewards catalog', icon: Gift },
           { id: 'billing', label: 'Billing', icon: CreditCard },
+          { id: 'concierge', label: 'Concierge', icon: Brain },
         ].map((t) => {
           const Icon = t.icon
           return (
@@ -111,6 +114,7 @@ export function SettingsView() {
       {tab === 'whatsapp' && <WhatsAppTab />}
       {tab === 'rewards' && <RewardsTab />}
       {tab === 'billing' && <BillingTab />}
+      {tab === 'concierge' && <ConciergeSettings />}
     </div>
   )
 }

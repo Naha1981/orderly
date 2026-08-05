@@ -1,4 +1,4 @@
-// /api/webhooks/evolution — public, verified, persists raw event first, dispatches keyword router
+// /api/webhooks/evolution — public, verified, persists raw event first, dispatches the full router
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import {
@@ -8,7 +8,7 @@ import {
   extractInstanceNameFromWebhook,
 } from '@/lib/integrations/evolution/client'
 import { findTenantByInstanceName } from '@/modules/loyalty/service'
-import { routeKeyword } from '@/modules/loyalty/router'
+import { routeInboundMessage } from '@/modules/concierge/router'
 
 export async function POST(req: NextRequest) {
   const raw = await req.text()
@@ -19,12 +19,10 @@ export async function POST(req: NextRequest) {
     payload = raw
   }
 
-  // Verify (best-effort — sandbox may not have secret set)
   const signature = req.headers.get('apikey') ?? req.headers.get('x-apikey') ?? null
   const verified = verifyWebhookSignature(signature, payload)
   const source = 'evolution'
 
-  // Determine tenant + event type
   const instanceName = extractInstanceNameFromWebhook(payload)
   const eventType = payload?.event ?? payload?.data?.event ?? null
   let tenantId: string | null = null
@@ -34,7 +32,7 @@ export async function POST(req: NextRequest) {
     if (t) tenantId = t.id
   }
 
-  // Persist raw event FIRST (before any processing)
+  // Persist raw event FIRST
   let webhookEventId: string | null = null
   if (db) {
     try {
@@ -53,35 +51,28 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // Only process messages from customers (not status updates)
   const phone = extractPhoneFromWebhook(payload)
   const text = extractTextFromWebhook(payload)
 
   if (phone && text && tenantId) {
-    const fromMe =
-      payload?.data?.key?.fromMe ?? payload?.data?.fromMe ?? false
-    if (!fromMe) {
+    const fromMe = payload?.data?.key?.fromMe ?? payload?.data?.fromMe ?? false
+    // Ignore group messages and messages sent by the business itself (loop prevention)
+    const isGroup = String(payload?.data?.key?.remoteJid ?? '').endsWith('@g.us')
+    if (!fromMe && !isGroup) {
       try {
-        await routeKeyword(tenantId, phone, text, payload?.data?.key?.id ?? webhookEventId ?? undefined)
+        await routeInboundMessage(tenantId, phone, text, payload?.data?.key?.id ?? webhookEventId ?? undefined)
         if (db && webhookEventId) {
-          await db.webhookEvent.update({
-            where: { id: webhookEventId },
-            data: { processed: true },
-          })
+          await db.webhookEvent.update({ where: { id: webhookEventId }, data: { processed: true } })
         }
       } catch (e: any) {
-        console.error('[webhooks/evolution] routeKeyword failed:', e)
+        console.error('[webhooks/evolution] route failed:', e)
         if (db && webhookEventId) {
-          await db.webhookEvent.update({
-            where: { id: webhookEventId },
-            data: { processed: false, error: e?.message ?? 'route failed' },
-          })
+          await db.webhookEvent.update({ where: { id: webhookEventId }, data: { processed: false, error: e?.message ?? 'route failed' } })
         }
       }
     }
   }
 
-  // Always return 200 fast — Evolution expects 200 to stop retrying
   return NextResponse.json({ ok: true })
 }
 

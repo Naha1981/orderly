@@ -1,0 +1,866 @@
+     1→// Orderly — Bookings engine (Reservations + Booking Drafts)
+     2→// Free-text → AI extraction → draft persists across messages → reservation
+     3→// created → confirmation sent. Plus cancel / reschedule / confirm-attendance.
+     4→// (PRD.md §6.3, plan.md §8 — Convert pipeline.)
+     5→
+     6→import { db, err, ok, requireDb, type Result } from '@/lib/db'
+     7→import { chat } from '@/lib/ai/provider'
+     8→import { sendMessage } from '@/modules/messaging/service'
+     9→
+    10→// ─── Phone normalization (local copy to avoid circular dep) ──────────────────
+    11→
+    12→function normalizePhoneLocal(raw: string): string {
+    13→  let digits = raw.replace(/[^\d]/g, '')
+    14→  if (digits.startsWith('0')) digits = '27' + digits.slice(1)
+    15→  if (!digits.startsWith('27') && digits.length <= 9) digits = '27' + digits
+    16→  return digits
+    17→}
+    18→
+    19→// ─── Date / time helpers ──────────────────────────────────────────────────────
+    20→
+    21→function todayStr(): string {
+    22→  const d = new Date()
+    23→  const y = d.getFullYear()
+    24→  const m = String(d.getMonth() + 1).padStart(2, '0')
+    25→  const day = String(d.getDate()).padStart(2, '0')
+    26→  return `${y}-${m}-${day}`
+    27→}
+    28→
+    29→export function getReservationDateTime(date: string, time: string): Date | null {
+    30→  if (!date || !time) return null
+    31→  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null
+    32→  if (!/^\d{2}:\d{2}$/.test(time)) return null
+    33→  const d = new Date(`${date}T${time}:00`)
+    34→  if (isNaN(d.getTime())) return null
+    35→  return d
+    36→}
+    37→
+    38→export function formatDate(iso: string): string {
+    39→  if (!iso) return ''
+    40→  try {
+    41→    const d = new Date(iso.length === 10 ? `${iso}T00:00:00` : iso)
+    42→    if (isNaN(d.getTime())) return iso
+    43→    return d.toLocaleDateString('en-US', {
+    44→      weekday: 'short',
+    45→      month: 'short',
+    46→      day: 'numeric',
+    47→      year: 'numeric',
+    48→    })
+    49→  } catch {
+    50→    return iso
+    51→  }
+    52→}
+    53→
+    54→// ─── Booking ref generator ────────────────────────────────────────────────────
+    55→// Format: ORD-XXXXXXXX (8 alphanumeric chars). Uses Math.random().toString(36)
+    56→// per spec. Retries on collision (extremely unlikely with 36^8 = ~2.8T space).
+    57→
+    58→function generateBookingRef(): string {
+    59→  const rand = Math.random().toString(36).slice(2, 10).toUpperCase().padEnd(8, '0').slice(0, 8)
+    60→  return `ORD-${rand}`
+    61→}
+    62→
+    63→async function generateUniqueBookingRef(database: any): Promise<string> {
+    64→  let ref = generateBookingRef()
+    65→  let attempts = 0
+    66→  while (attempts < 5) {
+    67→    const existing = await database.reservation.findUnique({
+    68→      where: { bookingRef: ref },
+    69→      select: { id: true },
+    70→    })
+    71→    if (!existing) return ref
+    72→    ref = generateBookingRef()
+    73→    attempts++
+    74→  }
+    75→  return ref
+    76→}
+    77→
+    78→// ─── Create reservation (deterministic) ───────────────────────────────────────
+    79→
+    80→export async function createReservation(
+    81→  tenantId: string,
+    82→  input: {
+    83→    customerId?: string | null
+    84→    phone: string
+    85→    name?: string | null
+    86→    reservationDate: string // YYYY-MM-DD
+    87→    reservationTime: string // HH:MM
+    88→    partySize: number
+    89→    occasion?: string | null
+    90→    specialRequests?: string | null
+    91→    allergies?: string | null
+    92→    source?: string // concierge | waitlist | manual | phone
+    93→  },
+    94→): Promise<Result<{ reservationId: string; bookingRef: string }>> {
+    95→  try {
+    96→    const database = requireDb()
+    97→    const normalized = normalizePhoneLocal(input.phone)
+    98→
+    99→    // Validate formats
+   100→    if (!/^\d{4}-\d{2}-\d{2}$/.test(input.reservationDate)) {
+   101→      return err('INVALID_DATE_FORMAT')
+   102→    }
+   103→    if (!/^\d{2}:\d{2}$/.test(input.reservationTime)) {
+   104→      return err('INVALID_TIME_FORMAT')
+   105→    }
+   106→    if (typeof input.partySize !== 'number' || input.partySize < 1 || input.partySize > 200) {
+   107→      return err('INVALID_PARTY_SIZE')
+   108→    }
+   109→
+   110→    // Resolve customer if not provided (so we can attach + pull allergies)
+   111→    let customerId = input.customerId ?? null
+   112→    let allergies = input.allergies ?? null
+   113→    let name = input.name ?? null
+   114→    if (!customerId) {
+   115→      const customer = await database.customer.findUnique({
+   116→        where: { tenantId_phone: { tenantId, phone: normalized } },
+   117→        select: { id: true, name: true, allergies: true },
+   118→      })
+   119→      if (customer) {
+   120→        customerId = customer.id
+   121→        allergies = allergies ?? customer.allergies
+   122→        name = name ?? customer.name
+   123→      }
+   124→    } else if (customerId) {
+   125→      const customer = await database.customer.findUnique({
+   126→        where: { id: customerId },
+   127→        select: { allergies: true, name: true },
+   128→      })
+   129→      if (customer) {
+   130→        allergies = allergies ?? customer.allergies
+   131→        name = name ?? customer.name
+   132→      }
+   133→    }
+   134→
+   135→    const bookingRef = await generateUniqueBookingRef(database)
+   136→
+   137→    const reservation = await database.reservation.create({
+   138→      data: {
+   139→        tenantId,
+   140→        customerId,
+   141→        phone: normalized,
+   142→        name,
+   143→        partySize: input.partySize,
+   144→        reservationDate: input.reservationDate,
+   145→        reservationTime: input.reservationTime,
+   146→        occasion: input.occasion ?? null,
+   147→        specialRequests: input.specialRequests ?? null,
+   148→        allergies,
+   149→        bookingRef,
+   150→        status: 'confirmed',
+   151→        source: input.source ?? 'concierge',
+   152→      },
+   153→    })
+   154→
+   155→    // Send confirmation via sendMessage gateway
+   156→    const tenant = await database.tenant.findUnique({
+   157→      where: { id: tenantId },
+   158→      select: { name: true },
+   159→    })
+   160→
+   161→    const confirmLines: string[] = [
+   162→      `✅ Booking confirmed!`,
+   163→      ``,
+   164→      `${tenant?.name ?? 'Restaurant'}`,
+   165→      `Ref: ${bookingRef}`,
+   166→      `Date: ${formatDate(input.reservationDate)}`,
+   167→      `Time: ${input.reservationTime}`,
+   168→      `Guests: ${input.partySize}`,
+   169→    ]
+   170→    if (input.occasion) confirmLines.push(`Occasion: ${input.occasion}`)
+   171→    if (input.specialRequests) confirmLines.push(`Notes: ${input.specialRequests}`)
+   172→    confirmLines.push(``, `See you soon! Reply CONFIRM closer to the time to confirm your attendance, or CANCEL to cancel.`)
+   173→
+   174→    await sendMessage(tenantId, normalized, confirmLines.join('\n'), {
+   175→      customerId: customerId ?? undefined,
+   176→      idempotencyKey: `booking-confirm-${reservation.id}`,
+   177→    })
+   178→
+   179→    return ok({ reservationId: reservation.id, bookingRef })
+   180→  } catch (e: any) {
+   181→    console.error('[bookings] createReservation failed:', e)
+   182→    return err(`exception: ${e?.message ?? e}`)
+   183→  }
+   184→}
+   185→
+   186→// ─── Check availability (simple capacity check) ───────────────────────────────
+   187→
+   188→export async function checkAvailability(
+   189→  tenantId: string,
+   190→  date: string,
+   191→  time: string,
+   192→  partySize: number,
+   193→): Promise<Result<{ available: boolean; suggestedSlots?: string[] }>> {
+   194→  try {
+   195→    const database = requireDb()
+   196→    const tenant = await database.tenant.findUnique({
+   197→      where: { id: tenantId },
+   198→      select: { capacity: true },
+   199→    })
+   200→    if (!tenant) return err('TENANT_NOT_FOUND')
+   201→
+   202→    // No capacity configured → assume available
+   203→    if (!tenant.capacity) {
+   204→      return ok({ available: true })
+   205→    }
+   206→
+   207→    const existing = await database.reservation.findMany({
+   208→      where: {
+   209→        tenantId,
+   210→        reservationDate: date,
+   211→        reservationTime: time,
+   212→        status: { in: ['pending', 'confirmed', 'seated'] },
+   213→      },
+   214→      select: { partySize: true },
+   215→    })
+   216→    const currentCovers = existing.reduce((sum: number, r: any) => sum + r.partySize, 0)
+   217→    const available = currentCovers + partySize <= tenant.capacity
+   218→
+   219→    let suggestedSlots: string[] | undefined
+   220→    if (!available) {
+   221→      // Suggest alternative times — same day, ±2 hours in 30-min increments
+   222→      // within an 11:00–22:00 service window.
+   223→      const slots: string[] = []
+   224→      const [h, m] = time.split(':').map(Number)
+   225→      const baseMin = h * 60 + m
+   226→      for (const offset of [-120, -90, -60, -30, 30, 60, 90, 120]) {
+   227→        const min = baseMin + offset
+   228→        if (min < 11 * 60 || min > 22 * 60) continue
+   229→        const hh = String(Math.floor(min / 60)).padStart(2, '0')
+   230→        const mm = String(min % 60).padStart(2, '0')
+   231→        const slot = `${hh}:${mm}`
+   232→        const slotExisting = await database.reservation.findMany({
+   233→          where: {
+   234→            tenantId,
+   235→            reservationDate: date,
+   236→            reservationTime: slot,
+   237→            status: { in: ['pending', 'confirmed', 'seated'] },
+   238→          },
+   239→          select: { partySize: true },
+   240→        })
+   241→        const slotCovers = slotExisting.reduce((s: number, r: any) => s + r.partySize, 0)
+   242→        if (slotCovers + partySize <= tenant.capacity) {
+   243→          slots.push(slot)
+   244→        }
+   245→      }
+   246→      suggestedSlots = slots.length > 0 ? slots : undefined
+   247→    }
+   248→
+   249→    return ok({ available, suggestedSlots })
+   250→  } catch (e: any) {
+   251→    console.error('[bookings] checkAvailability failed:', e)
+   252→    return err(`exception: ${e?.message ?? e}`)
+   253→  }
+   254→}
+   255→
+   256→// ─── List reservations (filterable) ───────────────────────────────────────────
+   257→
+   258→export async function listReservations(
+   259→  tenantId: string,
+   260→  filters?: { date?: string; status?: string; limit?: number },
+   261→): Promise<any[]> {
+   262→  if (!db) return []
+   263→  try {
+   264→    const where: any = { tenantId }
+   265→    if (filters?.date) where.reservationDate = filters.date
+   266→    if (filters?.status) where.status = filters.status
+   267→    const limit = Math.min(filters?.limit ?? 50, 200)
+   268→    return await db.reservation.findMany({
+   269→      where,
+   270→      orderBy: [{ reservationDate: 'asc' }, { reservationTime: 'asc' }],
+   271→      take: limit,
+   272→      include: { customer: { select: { name: true, phone: true } } },
+   273→    })
+   274→  } catch (e) {
+   275→    console.error('[bookings] listReservations failed:', e)
+   276→    return []
+   277→  }
+   278→}
+   279→
+   280→// ─── Get today's reservations (dashboard) ─────────────────────────────────────
+   281→
+   282→export async function getTodaysReservations(tenantId: string): Promise<any[]> {
+   283→  if (!db) return []
+   284→  try {
+   285→    const today = todayStr()
+   286→    return await db.reservation.findMany({
+   287→      where: {
+   288→        tenantId,
+   289→        reservationDate: today,
+   290→        status: { in: ['pending', 'confirmed', 'seated', 'completed'] },
+   291→      },
+   292→      orderBy: { reservationTime: 'asc' },
+   293→      include: {
+   294→        customer: {
+   295→          select: { name: true, phone: true, allergies: true, status: true },
+   296→        },
+   297→      },
+   298→    })
+   299→  } catch (e) {
+   300→    console.error('[bookings] getTodaysReservations failed:', e)
+   301→    return []
+   302→  }
+   303→}
+   304→
+   305→// ─── Mark no-show ─────────────────────────────────────────────────────────────
+   306→
+   307→export async function markNoShow(
+   308→  tenantId: string,
+   309→  reservationId: string,
+   310→): Promise<Result<void>> {
+   311→  try {
+   312→    const database = requireDb()
+   313→    const reservation = await database.reservation.findFirst({
+   314→      where: { id: reservationId, tenantId },
+   315→      select: {
+   316→        id: true,
+   317→        reservationDate: true,
+   318→        reservationTime: true,
+   319→        partySize: true,
+   320→        status: true,
+   321→      },
+   322→    })
+   323→    if (!reservation) return err('RESERVATION_NOT_FOUND')
+   324→
+   325→    await database.reservation.update({
+   326→      where: { id: reservation.id },
+   327→      data: { status: 'no_show' },
+   328→    })
+   329→
+   330→    // Offer the freed slot to waitlist (dynamic import — avoids circular dep)
+   331→    try {
+   332→      const { offerFreedTable } = await import('@/modules/waitlist/service')
+   333→      await offerFreedTable(
+   334→        tenantId,
+   335→        reservation.reservationDate,
+   336→        reservation.reservationTime,
+   337→        reservation.partySize,
+   338→      )
+   339→    } catch (e) {
+   340→      console.warn('[bookings] offerFreedTable on no-show failed:', e)
+   341→    }
+   342→
+   343→    return ok(undefined)
+   344→  } catch (e: any) {
+   345→    console.error('[bookings] markNoShow failed:', e)
+   346→    return err(`exception: ${e?.message ?? e}`)
+   347→  }
+   348→}
+   349→
+   350→// ─── Mark completed (called when meal ends / end of service) ──────────────────
+   351→
+   352→export async function markCompleted(
+   353→  tenantId: string,
+   354→  reservationId: string,
+   355→): Promise<Result<void>> {
+   356→  try {
+   357→    const database = requireDb()
+   358→    const reservation = await database.reservation.findFirst({
+   359→      where: { id: reservationId, tenantId },
+   360→      select: {
+   361→        id: true,
+   362→        customerId: true,
+   363→        phone: true,
+   364→        bookingRef: true,
+   365→        completedAt: true,
+   366→        reviewRequestedAt: true,
+   367→      },
+   368→    })
+   369→    if (!reservation) return err('RESERVATION_NOT_FOUND')
+   370→
+   371→    await database.reservation.update({
+   372→      where: { id: reservation.id },
+   373→      data: {
+   374→        status: 'completed',
+   375→        completedAt: new Date(),
+   376→        reviewRequestedAt: new Date(),
+   377→      },
+   378→    })
+   379→
+   380→    // Send the post-meal review request (sets the 48h window via reviewRequestedAt)
+   381→    const tenant = await database.tenant.findUnique({
+   382→      where: { id: tenantId },
+   383→      select: { name: true },
+   384→    })
+   385→
+   386→    await sendMessage(
+   387→      tenantId,
+   388→      reservation.phone,
+   389→      `Thanks for dining at ${tenant?.name ?? 'our restaurant'}! 🍽️\n\nHow was everything? Reply with a rating 1-5 and any feedback — we read every message.`,
+   390→      {
+   391→        customerId: reservation.customerId ?? undefined,
+   392→        idempotencyKey: `review-request-${reservation.id}`,
+   393→      },
+   394→    )
+   395→
+   396→    return ok(undefined)
+   397→  } catch (e: any) {
+   398→    console.error('[bookings] markCompleted failed:', e)
+   399→    return err(`exception: ${e?.message ?? e}`)
+   400→  }
+   401→}
+   402→
+   403→// ─── Find reservation by booking ref ──────────────────────────────────────────
+   404→
+   405→export async function findReservationByRef(
+   406→  tenantId: string,
+   407→  bookingRef: string,
+   408→): Promise<any | null> {
+   409→  if (!db) return null
+   410→  try {
+   411→    return await db.reservation.findFirst({
+   412→      where: { tenantId, bookingRef },
+   413→      include: { customer: { select: { name: true, phone: true } } },
+   414→    })
+   415→  } catch (e) {
+   416→    console.error('[bookings] findReservationByRef failed:', e)
+   417→    return null
+   418→  }
+   419→}
+   420→
+   421→// ─── Find upcoming reservations for a phone number ───────────────────────────
+   422→
+   423→export async function findUpcomingReservations(
+   424→  tenantId: string,
+   425→  phone: string,
+   426→): Promise<any[]> {
+   427→  if (!db) return []
+   428→  try {
+   429→    const normalized = normalizePhoneLocal(phone)
+   430→    const today = todayStr()
+   431→    return await db.reservation.findMany({
+   432→      where: {
+   433→        tenantId,
+   434→        phone: normalized,
+   435→        status: { in: ['pending', 'confirmed'] },
+   436→        reservationDate: { gte: today },
+   437→      },
+   438→      orderBy: [{ reservationDate: 'asc' }, { reservationTime: 'asc' }],
+   439→    })
+   440→  } catch (e) {
+   441→    console.error('[bookings] findUpcomingReservations failed:', e)
+   442→    return []
+   443→  }
+   444→}
+   445→
+   446→// ─── AI-extract booking details from free text ───────────────────────────────
+   447→
+   448→export async function extractBookingDetails(message: string): Promise<{
+   449→  partySize?: number
+   450→  reservationDate?: string
+   451→  reservationTime?: string
+   452→  occasion?: string
+   453→  specialRequests?: string
+   454→  intent?: 'book' | 'reschedule' | 'cancel' | 'other'
+   455→}> {
+   456→  const today = todayStr()
+   457→  const systemPrompt = `Extract booking details from this WhatsApp message. Return ONLY valid JSON with keys: partySize (number|null), reservationDate (YYYY-MM-DD|null), reservationTime (HH:MM 24h|null), occasion (string|null), specialRequests (string|null), intent ('book'|'reschedule'|'cancel'|'other'). Today is ${today}. If the user says 'Friday' and today is Wednesday, the date is this coming Friday. Be conservative — only set a field if the message clearly implies it.`
+   458→
+   459→  try {
+   460→    const resp = await chat(
+   461→      [
+   462→        { role: 'system', content: systemPrompt },
+   463→        { role: 'user', content: message },
+   464→      ],
+   465→      { temperature: 0.1, maxTokens: 300 },
+   466→    )
+   467→    if (!resp) return {}
+   468→
+   469→    // The LLM may wrap JSON in code fences or preamble; extract the first {...} block.
+   470→    const jsonMatch = resp.match(/\{[\s\S]*\}/)
+   471→    if (!jsonMatch) return {}
+   472→
+   473→    const parsed = JSON.parse(jsonMatch[0])
+   474→
+   475→    // Validate & sanitize each field
+   476→    const result: any = {}
+   477→    if (
+   478→      typeof parsed.partySize === 'number' &&
+   479→      parsed.partySize > 0 &&
+   480→      parsed.partySize < 200
+   481→    ) {
+   482→      result.partySize = Math.floor(parsed.partySize)
+   483→    }
+   484→    if (
+   485→      typeof parsed.reservationDate === 'string' &&
+   486→      /^\d{4}-\d{2}-\d{2}$/.test(parsed.reservationDate)
+   487→    ) {
+   488→      result.reservationDate = parsed.reservationDate
+   489→    }
+   490→    if (
+   491→      typeof parsed.reservationTime === 'string' &&
+   492→      /^\d{2}:\d{2}$/.test(parsed.reservationTime)
+   493→    ) {
+   494→      result.reservationTime = parsed.reservationTime
+   495→    }
+   496→    if (typeof parsed.occasion === 'string' && parsed.occasion.trim()) {
+   497→      result.occasion = parsed.occasion.trim()
+   498→    }
+   499→    if (
+   500→      typeof parsed.specialRequests === 'string' &&
+   501→      parsed.specialRequests.trim()
+   502→    ) {
+   503→      result.specialRequests = parsed.specialRequests.trim()
+   504→    }
+   505→    if (['book', 'reschedule', 'cancel', 'other'].includes(parsed.intent)) {
+   506→      result.intent = parsed.intent
+   507→    }
+   508→    return result
+   509→  } catch (e) {
+   510→    console.warn('[bookings] extractBookingDetails parse failed:', e)
+   511→    return {}
+   512→  }
+   513→}
+   514→
+   515→// ─── Has active booking draft ─────────────────────────────────────────────────
+   516→
+   517→export async function hasActiveBookingDraft(
+   518→  tenantId: string,
+   519→  phone: string,
+   520→): Promise<boolean> {
+   521→  try {
+   522→    const database = requireDb()
+   523→    const normalized = normalizePhoneLocal(phone)
+   524→    const draft = await database.bookingDraft.findFirst({
+   525→      where: { tenantId, phone: normalized, status: 'collecting' },
+   526→      select: { id: true },
+   527→    })
+   528→    return !!draft
+   529→  } catch {
+   530→    return false
+   531→  }
+   532→}
+   533→
+   534→// ─── Process a booking message (the main AI extraction flow) ──────────────────
+   535→
+   536→export async function processBookingMessage(
+   537→  tenantId: string,
+   538→  phone: string,
+   539→  message: string,
+   540→): Promise<{
+   541→  status: 'collecting' | 'completed' | 'failed'
+   542→  missing?: string[]
+   543→  reservation?: any
+   544→}> {
+   545→  try {
+   546→    const database = requireDb()
+   547→    const normalized = normalizePhoneLocal(phone)
+   548→
+   549→    // 1. Find existing collecting draft or create new
+   550→    let draft = await database.bookingDraft.findFirst({
+   551→      where: { tenantId, phone: normalized, status: 'collecting' },
+   552→      orderBy: { updatedAt: 'desc' },
+   553→    })
+   554→
+   555→    // 2. Extract via AI
+   556→    const extracted = await extractBookingDetails(message)
+   557→
+   558→    // 3. Build update data — only non-null/non-empty extracted fields
+   559→    const updateData: any = {}
+   560→    if (extracted.partySize) updateData.partySize = extracted.partySize
+   561→    if (extracted.reservationDate) updateData.reservationDate = extracted.reservationDate
+   562→    if (extracted.reservationTime) updateData.reservationTime = extracted.reservationTime
+   563→    if (extracted.occasion) updateData.occasion = extracted.occasion
+   564→    if (extracted.specialRequests) updateData.specialRequests = extracted.specialRequests
+   565→
+   566→    // Resolve customer
+   567→    const customer = await database.customer.findUnique({
+   568→      where: { tenantId_phone: { tenantId, phone: normalized } },
+   569→      select: { id: true, name: true },
+   570→    })
+   571→
+   572→    if (draft) {
+   573→      if (Object.keys(updateData).length > 0) {
+   574→        draft = await database.bookingDraft.update({
+   575→          where: { id: draft.id },
+   576→          data: {
+   577→            ...updateData,
+   578→            ...(customer ? { customerId: customer.id } : {}),
+   579→          },
+   580→        })
+   581→      }
+   582→    } else {
+   583→      draft = await database.bookingDraft.create({
+   584→        data: {
+   585→          tenantId,
+   586→          phone: normalized,
+   587→          customerId: customer?.id ?? null,
+   588→          ...updateData,
+   589→          status: 'collecting',
+   590→        },
+   591→      })
+   592→    }
+   593→
+   594→    // 4. Determine missing required fields
+   595→    const missing: string[] = []
+   596→    if (!draft.partySize) missing.push('party size (number of guests)')
+   597→    if (!draft.reservationDate) missing.push('date')
+   598→    if (!draft.reservationTime) missing.push('time')
+   599→
+   600→    // 5. All present → create reservation + close draft
+   601→    // (TypeScript can't narrow through the missing-array check, so we
+   602→    // explicitly re-read the non-null fields.)
+   603→    if (missing.length === 0 && draft.partySize && draft.reservationDate && draft.reservationTime) {
+   604→      const result = await createReservation(tenantId, {
+   605→        customerId: draft.customerId ?? null,
+   606→        phone: normalized,
+   607→        name: customer?.name ?? null,
+   608→        reservationDate: draft.reservationDate,
+   609→        reservationTime: draft.reservationTime,
+   610→        partySize: draft.partySize,
+   611→        occasion: draft.occasion,
+   612→        specialRequests: draft.specialRequests,
+   613→        source: 'concierge',
+   614→      })
+   615→
+   616→      if (result.ok) {
+   617→        await database.bookingDraft.update({
+   618→          where: { id: draft.id },
+   619→          data: { status: 'completed' },
+   620→        })
+   621→
+   622→        // If this was a reschedule, cancel the old reservation + offer the freed slot
+   623→        if (draft.rescheduleOf) {
+   624→          const oldRes = await database.reservation.findUnique({
+   625→            where: { id: draft.rescheduleOf },
+   626→            select: {
+   627→              id: true,
+   628→              reservationDate: true,
+   629→              reservationTime: true,
+   630→              partySize: true,
+   631→              status: true,
+   632→            },
+   633→          })
+   634→          if (oldRes && ['pending', 'confirmed'].includes(oldRes.status)) {
+   635→            await database.reservation.update({
+   636→              where: { id: oldRes.id },
+   637→              data: { status: 'cancelled', cancelledAt: new Date() },
+   638→            })
+   639→            try {
+   640→              const { offerFreedTable } = await import('@/modules/waitlist/service')
+   641→              await offerFreedTable(
+   642→                tenantId,
+   643→                oldRes.reservationDate,
+   644→                oldRes.reservationTime,
+   645→                oldRes.partySize,
+   646→              )
+   647→            } catch (e) {
+   648→              console.warn('[bookings] offerFreedTable on reschedule failed:', e)
+   649→            }
+   650→          }
+   651→        }
+   652→
+   653→        const reservation = await database.reservation.findUnique({
+   654→          where: { id: result.value.reservationId },
+   655→        })
+   656→        return { status: 'completed', reservation }
+   657→      } else {
+   658→        await sendMessage(
+   659→          tenantId,
+   660→          normalized,
+   661→          `Sorry, I couldn't complete your booking: ${result.error}. Please try again or call us directly.`,
+   662→          {
+   663→            customerId: customer?.id,
+   664→            idempotencyKey: `booking-fail-${draft.id}-${Date.now()}`,
+   665→          },
+   666→        )
+   667→        return { status: 'failed', missing }
+   668→      }
+   669→    }
+   670→
+   671→    // 6. Missing → ask for the missing fields
+   672→    const haveLines: string[] = []
+   673→    if (draft.partySize) haveLines.push(`${draft.partySize} guests`)
+   674→    if (draft.reservationDate) haveLines.push(`date ${formatDate(draft.reservationDate)}`)
+   675→    if (draft.reservationTime) haveLines.push(`time ${draft.reservationTime}`)
+   676→    const haveSummary = haveLines.length > 0 ? ` So far I have: ${haveLines.join(', ')}.` : ''
+   677→    const askMsg =
+   678→      `I'd love to get that booked for you!${haveSummary}\n\n` +
+   679→      `To finish, I still need: ${missing.join(', ')}.`
+   680→
+   681→    await sendMessage(tenantId, normalized, askMsg, {
+   682→      customerId: customer?.id,
+   683→      idempotencyKey: `booking-ask-${draft.id}-${Date.now()}`,
+   684→    })
+   685→
+   686→    return { status: 'collecting', missing }
+   687→  } catch (e: any) {
+   688→    console.error('[bookings] processBookingMessage failed:', e)
+   689→    return { status: 'failed' }
+   690→  }
+   691→}
+   692→
+   693→// ─── Cancel the soonest upcoming reservation for this phone ───────────────────
+   694→
+   695→export async function processCancel(
+   696→  tenantId: string,
+   697→  phone: string,
+   698→): Promise<{ status: 'cancelled' | 'none' }> {
+   699→  try {
+   700→    const database = requireDb()
+   701→    const normalized = normalizePhoneLocal(phone)
+   702→    const today = todayStr()
+   703→
+   704→    const upcoming = await database.reservation.findFirst({
+   705→      where: {
+   706→        tenantId,
+   707→        phone: normalized,
+   708→        status: { in: ['pending', 'confirmed'] },
+   709→        reservationDate: { gte: today },
+   710→      },
+   711→      orderBy: [{ reservationDate: 'asc' }, { reservationTime: 'asc' }],
+   712→    })
+   713→
+   714→    if (!upcoming) {
+   715→      await sendMessage(
+   716→        tenantId,
+   717→        normalized,
+   718→        `I couldn't find any upcoming bookings to cancel. If you'd like to make one, just tell me the date and party size.`,
+   719→        { idempotencyKey: `cancel-none-${normalized}-${Date.now()}` },
+   720→      )
+   721→      return { status: 'none' }
+   722→    }
+   723→
+   724→    await database.reservation.update({
+   725→      where: { id: upcoming.id },
+   726→      data: { status: 'cancelled', cancelledAt: new Date() },
+   727→    })
+   728→
+   729→    await sendMessage(
+   730→      tenantId,
+   731→      normalized,
+   732→      `Your booking ${upcoming.bookingRef} for ${upcoming.partySize} on ${formatDate(upcoming.reservationDate)} at ${upcoming.reservationTime} has been cancelled. We hope to see you another time!`,
+   733→      {
+   734→        customerId: upcoming.customerId ?? undefined,
+   735→        idempotencyKey: `cancel-confirm-${upcoming.id}`,
+   736→      },
+   737→    )
+   738→
+   739→    // Offer the freed slot to the waitlist (dynamic import to avoid circular dep)
+   740→    try {
+   741→      const { offerFreedTable } = await import('@/modules/waitlist/service')
+   742→      await offerFreedTable(
+   743→        tenantId,
+   744→        upcoming.reservationDate,
+   745→        upcoming.reservationTime,
+   746→        upcoming.partySize,
+   747→      )
+   748→    } catch (e) {
+   749→      console.warn('[bookings] offerFreedTable on cancel failed:', e)
+   750→    }
+   751→
+   752→    return { status: 'cancelled' }
+   753→  } catch (e: any) {
+   754→    console.error('[bookings] processCancel failed:', e)
+   755→    return { status: 'none' }
+   756→  }
+   757→}
+   758→
+   759→// ─── Start a reschedule draft (sets rescheduleOf) ─────────────────────────────
+   760→
+   761→export async function processReschedule(
+   762→  tenantId: string,
+   763→  phone: string,
+   764→): Promise<{ status: 'collecting' | 'none' }> {
+   765→  try {
+   766→    const database = requireDb()
+   767→    const normalized = normalizePhoneLocal(phone)
+   768→    const today = todayStr()
+   769→
+   770→    const upcoming = await database.reservation.findFirst({
+   771→      where: {
+   772→        tenantId,
+   773→        phone: normalized,
+   774→        status: { in: ['pending', 'confirmed'] },
+   775→        reservationDate: { gte: today },
+   776→      },
+   777→      orderBy: [{ reservationDate: 'asc' }, { reservationTime: 'asc' }],
+   778→    })
+   779→
+   780→    if (!upcoming) {
+   781→      await sendMessage(
+   782→        tenantId,
+   783→        normalized,
+   784→        `I couldn't find any upcoming bookings to reschedule. Would you like to make a new one?`,
+   785→        { idempotencyKey: `resched-none-${normalized}-${Date.now()}` },
+   786→      )
+   787→      return { status: 'none' }
+   788→    }
+   789→
+   790→    // Pre-seed a draft with the existing reservation's details + rescheduleOf
+   791→    await database.bookingDraft.create({
+   792→      data: {
+   793→        tenantId,
+   794→        phone: normalized,
+   795→        customerId: upcoming.customerId,
+   796→        rescheduleOf: upcoming.id,
+   797→        partySize: upcoming.partySize,
+   798→        occasion: upcoming.occasion,
+   799→        specialRequests: upcoming.specialRequests,
+   800→        status: 'collecting',
+   801→      },
+   802→    })
+   803→
+   804→    await sendMessage(
+   805→      tenantId,
+   806→      normalized,
+   807→      `Sure — let's reschedule your booking ${upcoming.bookingRef} (currently ${formatDate(upcoming.reservationDate)} at ${upcoming.reservationTime}). What date and time would work better?`,
+   808→      {
+   809→        customerId: upcoming.customerId ?? undefined,
+   810→        idempotencyKey: `resched-start-${upcoming.id}`,
+   811→      },
+   812→    )
+   813→
+   814→    return { status: 'collecting' }
+   815→  } catch (e: any) {
+   816→    console.error('[bookings] processReschedule failed:', e)
+   817→    return { status: 'none' }
+   818→  }
+   819→}
+   820→
+   821→// ─── Confirm attendance (from the 6h reminder) ────────────────────────────────
+   822→
+   823→export async function processConfirmAttendance(
+   824→  tenantId: string,
+   825→  phone: string,
+   826→): Promise<boolean> {
+   827→  try {
+   828→    const database = requireDb()
+   829→    const normalized = normalizePhoneLocal(phone)
+   830→    const today = todayStr()
+   831→
+   832→    const reservation = await database.reservation.findFirst({
+   833→      where: {
+   834→        tenantId,
+   835→        phone: normalized,
+   836→        status: { in: ['pending', 'confirmed'] },
+   837→        guestConfirmedAttendance: false,
+   838→        reservationDate: { gte: today },
+   839→      },
+   840→      orderBy: [{ reservationDate: 'asc' }, { reservationTime: 'asc' }],
+   841→    })
+   842→
+   843→    if (!reservation) return false
+   844→
+   845→    await database.reservation.update({
+   846→      where: { id: reservation.id },
+   847→      data: { guestConfirmedAttendance: true },
+   848→    })
+   849→
+   850→    await sendMessage(
+   851→      tenantId,
+   852→      normalized,
+   853→      `Thanks for confirming! We'll see you on ${formatDate(reservation.reservationDate)} at ${reservation.reservationTime}. Reference: ${reservation.bookingRef}.`,
+   854→      {
+   855→        customerId: reservation.customerId ?? undefined,
+   856→        idempotencyKey: `confirm-attend-${reservation.id}`,
+   857→      },
+   858→    )
+   859→
+   860→    return true
+   861→  } catch (e: any) {
+   862→    console.error('[bookings] processConfirmAttendance failed:', e)
+   863→    return false
+   864→  }
+   865→}
+   866→

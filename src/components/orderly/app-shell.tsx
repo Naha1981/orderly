@@ -44,6 +44,7 @@ import {
   Sparkles,
   Building2,
   Loader2,
+  CalendarCheck,
 } from 'lucide-react'
 import { Dashboard } from '@/components/orderly/dashboard'
 import { Customers } from '@/components/orderly/customers'
@@ -51,10 +52,12 @@ import { Campaigns } from '@/components/orderly/campaigns'
 import { Insights } from '@/components/orderly/insights'
 import { SettingsView } from '@/components/orderly/settings'
 import { QrPosterView } from '@/components/orderly/qr-poster-view'
+import { BookingsView } from '@/components/orderly/bookings-view'
+import { ReviewsView } from '@/components/orderly/reviews-view'
 import { toast } from 'sonner'
 import { cn } from '@/lib/utils'
 
-type View = 'dashboard' | 'customers' | 'campaigns' | 'insights' | 'settings' | 'qr-poster'
+type View = 'dashboard' | 'customers' | 'campaigns' | 'insights' | 'settings' | 'qr-poster' | 'bookings' | 'reviews'
 
 export function AppShell() {
   const { user, logout } = useAuth()
@@ -63,6 +66,8 @@ export function AppShell() {
 
   const navItems: { id: View; label: string; icon: any }[] = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
+    { id: 'bookings', label: 'Bookings', icon: CalendarCheck },
+    { id: 'reviews', label: 'Reviews', icon: Star },
     { id: 'customers', label: 'Customers', icon: Users },
     { id: 'campaigns', label: 'Campaigns', icon: Zap },
     { id: 'insights', label: 'Insights', icon: BarChart3 },
@@ -166,6 +171,8 @@ export function AppShell() {
         <main className="flex-1 min-w-0">
           <div className="mx-auto max-w-6xl p-4 md:p-8">
             {view === 'dashboard' && <Dashboard onNavigate={setView} />}
+            {view === 'bookings' && <BookingsView />}
+            {view === 'reviews' && <ReviewsView />}
             {view === 'customers' && <Customers />}
             {view === 'campaigns' && <Campaigns />}
             {view === 'insights' && <Insights />}

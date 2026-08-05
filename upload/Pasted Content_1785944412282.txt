@@ -1,0 +1,733 @@
+This is a big, multi-part deliverable, so here's how I'm organizing it: **Part A** is the Next.js homepage component (Orderly-branded), and **Part B** is the full Orderly PRD — which consolidates the updated automations, app pages, user journeys, ROI, and benefits so nothing is duplicated. I'm producing these as files/documents you save into the project; you (or your coding assistant) paste and deploy them.
+
+One honest flag up front: the knowledge base describes the product as **Flavourly OS** on a Supabase/Vite stack. You've since rebranded the restaurant-focused system to **Orderly** and moved to the **NAHALABS stack** (Next.js + Clerk + Neon + Drizzle). Everything below uses **Orderly** + the NAHALABS stack.
+
+---
+
+# PART A — The Next.js Homepage Component
+
+Two files. Save as shown.
+
+## `src/app/(marketing)/page.tsx`
+
+```tsx
+import { InviteForm } from '@/components/marketing/invite-form';
+import {
+  Armchair, CalendarCheck, MessageCircle, Star, TrendingUp, ChefHat,
+  Users, Clock, ShieldCheck, Sparkles, QrCode, Link2, ChevronDown,
+} from 'lucide-react';
+
+export const metadata = {
+  title: 'Orderly — Fill your empty chairs. Turn walk-ins into regulars.',
+  description:
+    'Orderly books your tables, rewards your regulars, answers your messages, and fills your slow nights — all inside WhatsApp.',
+};
+
+/* ───────────────────────── DATA ───────────────────────── */
+
+const PAINS = [
+  'Table six is empty on a Tuesday, and nobody\u2019s doing anything about it.',
+  'A booking no-shows at 7pm and you only find out at 7pm.',
+  'Your favourite regular quietly stopped coming three months ago.',
+  'Someone asks \u201cdo you cater?\u201d on WhatsApp during peak service, and it goes unanswered.',
+  'A bad review lands on Google and you see it four days late.',
+  'You have no idea which promos worked and which were wasted.',
+];
+
+const SYSTEM = [
+  { icon: TrendingUp, title: 'Fill your slow nights', body: 'One-tap campaigns for quiet hours, rainy days, and payday weekends. See how many people you\u2019ll reach and what it\u2019s worth before you send.' },
+  { icon: CalendarCheck, title: 'Stop no-shows before they happen', body: 'Automatic confirmations at 48h, 24h, and 6h. If they don\u2019t reply, the table goes to your waitlist \u2014 not empty.' },
+  { icon: Users, title: 'Bring back the ones who left', body: 'Orderly notices who\u2019s gone quiet and wins them back at 30, 45, and 60 days \u2014 before they belong to someone else.' },
+  { icon: MessageCircle, title: 'Never miss a message \u2014 even mid-service', body: 'An AI concierge answers bookings, \u201cdo you cater?\u201d, and \u201cis it halal?\u201d on your WhatsApp, instantly, in your restaurant\u2019s voice.' },
+  { icon: Star, title: 'Know your VIPs by name', body: 'Recognises your regulars, remembers their favourite table, wine, and waiter, and celebrates birthdays automatically.' },
+  { icon: ShieldCheck, title: 'Protect your reputation', body: 'Asks every guest how it went. Happy guests get a Google link. Unhappy ones come to you privately \u2014 before they go public.' },
+  { icon: Clock, title: 'See exactly what\u2019s working', body: 'Every Monday, plain-English notes: what worked, what didn\u2019t, and three things to do this week. No charts. No jargon.' },
+];
+
+const ENGINES = [
+  { name: 'Acquire', items: 'QR joins, enquiry capture, catering & event leads, referrals' },
+  { name: 'Convert', items: 'Booking confirmations, no-show prevention, abandoned-booking recovery, waitlist fill' },
+  { name: 'Delight', items: 'VIP recognition, birthdays, anniversaries, upsells, chef\u2019s-table invites' },
+  { name: 'Loyalty', items: 'Points, rewards, GPS-verified redemption, VIP upgrades' },
+  { name: 'Market', items: 'Quiet-hour fill, win-backs, VIP rewards, behaviour-triggered offers' },
+  { name: 'Recover', items: '30/45/60-day win-back ladder, automatic reactivation' },
+  { name: 'Optimise', items: 'AI targeting, empty-table flash fills, weather & payday campaigns' },
+  { name: 'Operations', items: 'Daily manager brief, opening checklists, supplier reorders' },
+  { name: 'Reviews', items: 'Post-meal feedback, Google routing, private complaint alerts' },
+  { name: 'Intelligence', items: 'Weekly insights, revenue briefs, plain-English recommendations' },
+];
+
+const TIERS = [
+  { name: 'Starter', price: 'R299', for: 'Getting started', best: 'Your first loyal regulars', perks: ['Loyalty up to 500 guests', 'Core campaigns', 'QR + WhatsApp join', 'Weekly insights'] },
+  { name: 'Growth', price: 'R499', for: 'Growing steadily', best: 'Filling slow nights', featured: true, perks: ['Unlimited guests', 'Advanced campaigns', 'Recovery automations', 'Behaviour-triggered offers'] },
+  { name: 'Professional', price: 'R1,499', for: 'Running the front of house', best: 'Never missing a booking or message', perks: ['Everything in Growth', 'Bookings & reminders', 'AI Concierge', 'Reviews protection'] },
+  { name: 'Premium', price: 'R2,999', for: 'The full operating system', best: 'Running it all, hands-off', perks: ['Everything in Professional', 'Operations & checklists', 'AI targeting', 'Priority setup'] },
+];
+
+const FAQS = [
+  { q: 'Do my customers need an app?', a: 'No. Everything happens in WhatsApp \u2014 already on their phone.' },
+  { q: 'Is it really my own WhatsApp number?', a: 'Yes. Each restaurant gets its own connection. Guests chat with your restaurant, never a shared platform.' },
+  { q: 'Do I need to be technical?', a: 'No. If you can send a WhatsApp message, you can run Orderly. We set it up with you.' },
+  { q: 'What if I change my number?', a: 'Your guests, points, and history stay exactly where they are.' },
+  { q: 'What happens on the free trial?', a: 'Everything is live for 14 days. We help you send your first campaign before the trial ends.' },
+  { q: 'How do I get started?', a: 'It\u2019s invite-only. Request an invite and we\u2019ll send you a personal link on WhatsApp.' },
+];
+
+/* ───────────────────────── PAGE ───────────────────────── */
+
+export default function OrderlyHomePage() {
+  return (
+    <div className="min-h-screen bg-[#16110d] text-[#f5efe6] antialiased">
+
+      {/* NAV */}
+      <header className="sticky top-0 z-40 border-b border-white/5 bg-[#16110d]/90 backdrop-blur">
+        <nav className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
+          <a href="/" className="flex items-center gap-2 text-lg font-bold tracking-tight">
+            <ChefHat className="h-6 w-6 text-[#e8722a]" />
+            Orderly
+          </a>
+          <div className="hidden items-center gap-8 text-sm text-[#a89b8a] md:flex">
+            <a href="#how" className="hover:text-white transition-colors">How it works</a>
+            <a href="#inside" className="hover:text-white transition-colors">What&apos;s inside</a>
+            <a href="#pricing" className="hover:text-white transition-colors">Pricing</a>
+            <a href="#faq" className="hover:text-white transition-colors">FAQ</a>
+          </div>
+          <a href="#invite" className="rounded-full bg-[#e8722a] px-5 py-2 text-sm font-semibold text-white transition hover:bg-[#f0823a]">
+            Request an invite
+          </a>
+        </nav>
+      </header>
+
+      {/* HERO */}
+      <section className="relative overflow-hidden">
+        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_top,rgba(232,114,42,0.14),transparent_60%)]" />
+        <div className="mx-auto max-w-6xl px-6 pb-20 pt-20 text-center md:pt-28">
+          <p className="mb-5 inline-flex items-center gap-2 rounded-full border border-[#e8722a]/30 bg-[#e8722a]/10 px-4 py-1.5 text-sm text-[#f0a04b]">
+            <Sparkles className="h-4 w-4" /> The restaurant growth system that lives in WhatsApp
+          </p>
+          <h1 className="mx-auto max-w-3xl text-4xl font-bold leading-tight tracking-tight md:text-6xl">
+            It&apos;s 2pm on a Tuesday.<br />
+            Table six is empty.<br />
+            <span className="text-[#e8722a]">That chair is earning you R0.</span>
+          </h1>
+          <p className="mx-auto mt-6 max-w-2xl text-lg text-[#a89b8a]">
+            Orderly books your tables, rewards your regulars, answers your messages, and fills
+            your slow nights &mdash; all inside WhatsApp. No app to download. No passwords. No training.
+            You run the kitchen. It runs the rest.
+          </p>
+          <div className="mt-9 flex flex-col items-center justify-center gap-3 sm:flex-row">
+            <a href="#invite" className="rounded-full bg-[#e8722a] px-8 py-3.5 text-base font-semibold text-white transition hover:bg-[#f0823a]">
+              Request an invite
+            </a>
+            <a href="#system" className="rounded-full border border-white/10 px-8 py-3.5 text-base font-medium text-[#f5efe6] transition hover:bg-white/5">
+              See how it fills empty chairs
+            </a>
+          </div>
+          <p className="mt-6 text-sm text-[#7c6f5f]">
+            We set you up personally &middot; 14-day free trial &middot; Your customers download nothing
+          </p>
+
+          {/* Empty vs full chair motif */}
+          <div className="mx-auto mt-14 grid max-w-2xl grid-cols-1 gap-4 sm:grid-cols-2">
+            <div className="rounded-2xl border border-white/5 bg-[#211a13] p-6 text-left">
+              <Armchair className="mb-3 h-7 w-7 text-[#7c6f5f]" />
+              <p className="text-sm text-[#a89b8a]">An empty table on a slow night</p>
+              <p className="mt-1 text-3xl font-bold text-[#7c6f5f]">R0</p>
+            </div>
+            <div className="rounded-2xl border border-[#e8722a]/30 bg-[#e8722a]/10 p-6 text-left">
+              <Armchair className="mb-3 h-7 w-7 text-[#e8722a]" />
+              <p className="text-sm text-[#f0a04b]">That same table, filled by Orderly</p>
+              <p className="mt-1 text-3xl font-bold text-[#f0a04b]">R480+</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* VILLAIN */}
+      <section className="border-t border-white/5 bg-[#1a140f]">
+        <div className="mx-auto max-w-5xl px-6 py-20">
+          <h2 className="max-w-2xl text-3xl font-bold tracking-tight md:text-4xl">
+            You&apos;re not losing customers. You&apos;re losing the ones you <span className="text-[#e8722a]">never saw leave.</span>
+          </h2>
+          <ul className="mt-10 grid gap-4 md:grid-cols-2">
+            {PAINS.map((p) => (
+              <li key={p} className="flex items-start gap-3 rounded-xl border border-white/5 bg-[#211a13] p-4 text-[#d8cfc2]">
+                <span className="mt-1 h-2 w-2 shrink-0 rounded-full bg-[#e8722a]" />
+                {p}
+              </li>
+            ))}
+          </ul>
+          <p className="mt-8 max-w-2xl text-[#a89b8a]">
+            None of this is your fault &mdash; you&apos;re running a restaurant, not a marketing agency.
+            But every one of these is a chair, and every empty chair is money you&apos;ll never get back.
+          </p>
+        </div>
+      </section>
+
+      {/* SYSTEM */}
+      <section id="system" className="mx-auto max-w-6xl px-6 py-20">
+        <div className="text-center">
+          <h2 className="text-3xl font-bold tracking-tight md:text-4xl">One system. Every chair filled.</h2>
+          <p className="mx-auto mt-4 max-w-2xl text-[#a89b8a]">
+            Orderly isn&apos;t a loyalty app. It&apos;s the whole engine that keeps your dining room full
+            &mdash; loyalty is just one part of it.
+          </p>
+        </div>
+        <div className="mt-12 grid gap-5 md:grid-cols-2 lg:grid-cols-3">
+          {SYSTEM.map(({ icon: Icon, title, body }) => (
+            <div key={title} className="rounded-2xl border border-white/5 bg-[#211a13] p-6 transition hover:border-[#e8722a]/30">
+              <Icon className="mb-4 h-7 w-7 text-[#e8722a]" />
+              <h3 className="text-lg font-semibold">{title}</h3>
+              <p className="mt-2 text-sm leading-relaxed text-[#a89b8a]">{body}</p>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {/* HOW IT WORKS */}
+      <section id="how" className="border-y border-white/5 bg-[#1a140f]">
+        <div className="mx-auto max-w-5xl px-6 py-20">
+          <h2 className="text-center text-3xl font-bold tracking-tight md:text-4xl">
+            Your customers already have it. <span className="text-[#e8722a]">That&apos;s the whole trick.</span>
+          </h2>
+          <p className="mx-auto mt-4 max-w-2xl text-center text-[#a89b8a]">
+            No app to download. No password to forget. No card to carry. Your guests just text your
+            restaurant on WhatsApp &mdash; already on every phone in South Africa.
+          </p>
+          <div className="mt-12 grid gap-5 md:grid-cols-3">
+            {[
+              { n: '1', t: 'They connect once', b: 'Scan your QR code, tap your link, or text JOIN.' },
+              { n: '2', t: 'They just text', b: 'BOOK a table. BALANCE to check points. REDEEM for a reward. The AI handles the rest.' },
+              { n: '3', t: 'They come back', b: 'Orderly keeps them coming \u2014 and fills the chairs when it\u2019s quiet.' },
+            ].map((s) => (
+              <div key={s.n} className="rounded-2xl border border-white/5 bg-[#211a13] p-6">
+                <span className="text-4xl font-bold text-[#e8722a]">{s.n}</span>
+                <h3 className="mt-3 text-lg font-semibold">{s.t}</h3>
+                <p className="mt-2 text-sm text-[#a89b8a]">{s.b}</p>
+              </div>
+            ))}
+          </div>
+          <div className="mt-10 flex flex-col items-center justify-center gap-6 rounded-2xl border border-white/5 bg-[#211a13] p-6 md:flex-row md:gap-12">
+            <div className="flex items-center gap-3 text-sm text-[#d8cfc2]">
+              <Link2 className="h-5 w-5 text-[#e8722a]" />
+              One link &mdash; <span className="font-mono text-[#f0a04b]">orderly.app/yourname</span> &mdash; for every bio, listing &amp; site
+            </div>
+            <div className="flex items-center gap-3 text-sm text-[#d8cfc2]">
+              <QrCode className="h-5 w-5 text-[#e8722a]" />
+              Plus a QR code for your counter
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* WHAT'S INSIDE */}
+      <section id="inside" className="mx-auto max-w-6xl px-6 py-20">
+        <div className="text-center">
+          <h2 className="text-3xl font-bold tracking-tight md:text-4xl">10 engines. 54 automations. One full dining room.</h2>
+          <p className="mx-auto mt-4 max-w-2xl text-[#a89b8a]">
+            Most tools do one thing. Orderly runs the whole front of house.
+          </p>
+        </div>
+        <div className="mt-12 grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+          {ENGINES.map((e) => (
+            <div key={e.name} className="rounded-xl border border-white/5 bg-[#211a13] p-5">
+              <h3 className="font-semibold text-[#f0a04b]">{e.name}</h3>
+              <p className="mt-2 text-xs leading-relaxed text-[#a89b8a]">{e.items}</p>
+            </div>
+          ))}
+        </div>
+        <p className="mt-8 text-center text-sm text-[#7c6f5f]">
+          Loyalty is 8 of these 54. The other 46 are the reason your dining room stays full.
+        </p>
+      </section>
+
+      {/* PROMISE */}
+      <section className="border-y border-white/5 bg-[#1a140f]">
+        <div className="mx-auto max-w-3xl px-6 py-20 text-center">
+          <h2 className="text-3xl font-bold tracking-tight md:text-4xl">We don&apos;t hand you software and wish you luck.</h2>
+          <p className="mt-6 text-lg leading-relaxed text-[#a89b8a]">
+            Orderly is invite-only, on purpose. We set up every restaurant personally, connect your
+            WhatsApp with you, and make sure your first campaign goes out before we call it done.
+            You&apos;re not a signup to us &mdash; you&apos;re a table we&apos;re helping fill.
+          </p>
+        </div>
+      </section>
+
+      {/* PRICING */}
+      <section id="pricing" className="mx-auto max-w-6xl px-6 py-20">
+        <div className="text-center">
+          <h2 className="text-3xl font-bold tracking-tight md:text-4xl">Simple pricing. The more of the system you want, the more chairs you fill.</h2>
+          <p className="mx-auto mt-4 max-w-2xl text-[#a89b8a]">
+            Every plan starts with a 14-day free trial. No setup fee. Cancel anytime.
+          </p>
+        </div>
+        <div className="mt-12 grid gap-5 md:grid-cols-2 lg:grid-cols-4">
+          {TIERS.map((t) => (
+            <div key={t.name} className={`flex flex-col rounded-2xl border p-6 ${t.featured ? 'border-[#e8722a] bg-[#e8722a]/10' : 'border-white/5 bg-[#211a13]'}`}>
+              {t.featured && <span className="mb-3 w-fit rounded-full bg-[#e8722a] px-3 py-1 text-xs font-semibold text-white">Most popular</span>}
+              <h3 className="text-lg font-semibold">{t.name}</h3>
+              <p className="mt-1 text-3xl font-bold">{t.price}<span className="text-sm font-normal text-[#a89b8a]">/mo</span></p>
+              <p className="mt-1 text-xs text-[#7c6f5f]">{t.for}</p>
+              <ul className="mt-5 flex-1 space-y-2.5 text-sm text-[#d8cfc2]">
+                {t.perks.map((p) => (
+                  <li key={p} className="flex items-start gap-2"><span className="mt-1 h-1.5 w-1.5 rounded-full bg-[#e8722a]" />{p}</li>
+                ))}
+              </ul>
+              <p className="mt-5 text-xs italic text-[#a89b8a]">Best for: {t.best}</p>
+              <a href="#invite" className={`mt-5 rounded-full px-5 py-2.5 text-center text-sm font-semibold transition ${t.featured ? 'bg-[#e8722a] text-white hover:bg-[#f0823a]' : 'border border-white/10 hover:bg-white/5'}`}>
+                Request an invite
+              </a>
+            </div>
+          ))}
+        </div>
+        <p className="mt-8 text-center text-sm text-[#7c6f5f]">
+          Most restaurants cover the subscription with a handful of extra covers a month. One filled table usually pays for it.
+        </p>
+      </section>
+
+      {/* FAQ */}
+      <section id="faq" className="border-t border-white/5 bg-[#1a140f]">
+        <div className="mx-auto max-w-3xl px-6 py-20">
+          <h2 className="text-center text-3xl font-bold tracking-tight">Questions, answered straight.</h2>
+          <div className="mt-10 space-y-3">
+            {FAQS.map((f) => (
+              <details key={f.q} className="group rounded-xl border border-white/5 bg-[#211a13] p-5">
+                <summary className="flex cursor-pointer list-none items-center justify-between font-medium">
+                  {f.q}
+                  <ChevronDown className="h-5 w-5 text-[#e8722a] transition group-open:rotate-180" />
+                </summary>
+                <p className="mt-3 text-sm leading-relaxed text-[#a89b8a]">{f.a}</p>
+              </details>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* FINAL CTA + INVITE FORM */}
+      <section id="invite" className="mx-auto max-w-3xl px-6 py-24 text-center">
+        <h2 className="text-3xl font-bold tracking-tight md:text-5xl">
+          Every empty chair is money you&apos;ll never get back.
+        </h2>
+        <p className="mx-auto mt-5 max-w-xl text-lg text-[#a89b8a]">
+          Let&apos;s fill them. Request an invite and we&apos;ll set you up personally &mdash; live in
+          minutes, free for 14 days.
+        </p>
+        <InviteForm />
+      </section>
+
+      {/* FOOTER */}
+      <footer className="border-t border-white/5 bg-[#131009]">
+        <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-4 px-6 py-10 text-sm text-[#7c6f5f] md:flex-row">
+          <div className="flex items-center gap-2">
+            <ChefHat className="h-5 w-5 text-[#e8722a]" />
+            <span className="font-semibold text-[#f5efe6]">Orderly</span>
+            <span>&middot; Fill your empty chairs. Turn walk-ins into regulars.</span>
+          </div>
+          <div className="flex gap-6">
+            <a href="#how" className="hover:text-white">How it works</a>
+            <a href="#pricing" className="hover:text-white">Pricing</a>
+            <a href="#invite" className="hover:text-white">Request an invite</a>
+          </div>
+        </div>
+      </footer>
+    </div>
+  );
+}
+```
+
+## `src/components/marketing/invite-form.tsx`
+
+```tsx
+'use client';
+
+import { useState } from 'react';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+
+export function InviteForm() {
+  const [status, setStatus] = useState<'idle' | 'sending' | 'done' | 'error'>('idle');
+
+  async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    setStatus('sending');
+    try {
+      const form = e.currentTarget;
+      const res = await fetch('/api/v1/invite-requests', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          restaurantName: new FormData(form).get('restaurantName'),
+          ownerName: new FormData(form).get('ownerName'),
+          phone: new FormData(form).get('phone'),
+        }),
+      });
+      if (!res.ok) throw new Error();
+      setStatus('done');
+    } catch {
+      setStatus('error');
+    }
+  }
+
+  if (status === 'done') {
+    return (
+      <p className="mt-8 rounded-xl border border-[#e8722a]/30 bg-[#e8722a]/10 p-5 text-[#f0a04b]">
+        Thanks! We&apos;ll WhatsApp you your personal invite shortly. Keep an eye on your phone.
+      </p>
+    );
+  }
+
+  return (
+    <form onSubmit={onSubmit} className="mx-auto mt-9 flex max-w-md flex-col gap-3">
+      <Input name="restaurantName" placeholder="Restaurant name" required className="h-12 border-white/10 bg-[#211a13]" />
+      <Input name="ownerName" placeholder="Your name" required className="h-12 border-white/10 bg-[#211a13]" />
+      <Input name="phone" type="tel" placeholder="Your WhatsApp number (e.g. 072 123 4567)" required className="h-12 border-white/10 bg-[#211a13]" />
+      <Button type="submit" disabled={status === 'sending'} className="h-12 rounded-full bg-[#e8722a] text-base font-semibold hover:bg-[#f0823a]">
+        {status === 'sending' ? 'Sending…' : 'Request my invite'}
+      </Button>
+      {status === 'error' && <p className="text-sm text-red-400">Something went wrong. Please try again.</p>}
+    </form>
+  );
+}
+```
+
+> You'll also need a thin `src/app/api/v1/invite-requests/route.ts` that validates with Zod and inserts into your `prospects` table (status `new`, source `homepage`). Same shape as your Super Admin prospect upload. Tell me if you want that route written.
+
+---
+
+# PART B — The Orderly PRD (no stone unturned)
+
+Save this as `ORDERLY-PRD.md`. It consolidates the updated automations, app pages, user journeys, ROI, features, and benefits.
+
+---
+
+## 1 · Executive Summary
+
+**Orderly** is a WhatsApp-native restaurant growth platform for South African independent restaurants. It turns the messaging app every customer already has into a complete front-of-house engine: bookings, loyalty, AI concierge, marketing campaigns, customer recovery, reviews, operations, and plain-English intelligence.
+
+**The core insight — the Empty Chair Principle:** an empty table earns R0. Not a little. Nothing. A sale that fills that seat, even at a discount, is money a restaurant would otherwise never see. Every feature in Orderly exists to fill empty chairs.
+
+Orderly is **invite-only**, **founder-led**, and **pre-launch**. The restaurant owner gets their own branded WhatsApp connection; their customers never download anything.
+
+**Rebrand note:** Orderly is the restaurant-focused evolution of the loyalty product previously specified as Flavourly OS. Loyalty is retained as one of ten engines (8 of 54 automations), not the whole product.
+
+---
+
+## 2 · Problem Statement
+
+Independent restaurants leak revenue from six directions they can't see:
+
+1. **Underutilised capacity** — empty tables on weekdays and off-peak hours.
+2. **No-shows** — bookings that silently don't arrive.
+3. **Silent churn** — regulars who quietly stop coming, unnoticed.
+4. **Missed enquiries** — booking and catering requests unanswered during service.
+5. **Reputation blind spots** — bad reviews seen days late.
+6. **No attribution** — no idea which promotions actually worked.
+
+Owners are **time-poor, non-technical, and thin-margin**. They will not adopt a CRM, configure dashboards, or ask customers to download an app. Any solution must meet them where they already live: **WhatsApp, in plain English, with no setup burden.**
+
+---
+
+## 3 · Target Market & ICP
+
+**Primary ICP:** independent, sit-down restaurants in South Africa (1–3 locations), 15–80 covers, owner-operated, already using WhatsApp with customers.
+
+**Expanded verticals (roadmap):** cafes, bars, bistros. The original six-vertical model (car washes, salons, barbers, retail) is deprioritised in favour of going deep on restaurants first.
+
+**Why SA, why WhatsApp:**
+- WhatsApp is near-universal; data costs make app downloads a real barrier.
+- No-app, no-password, no-card removes every friction point.
+- Invite-only, founder-led sales matches a trust-first market.
+
+---
+
+## 4 · Positioning
+
+> **Orderly — Fill your empty chairs. Turn walk-ins into regulars.**
+
+Orderly is **not** positioned as a loyalty programme. It is positioned as **the system that keeps a dining room full.** Loyalty is one mechanism among ten. The homepage, pricing, and pitch all sell the *outcome* (a full restaurant, fewer no-shows, regulars back, time reclaimed), with the 54 automations as the credibility underneath.
+
+---
+
+## 5 · Solution Overview
+
+One platform, three surfaces:
+
+1. **The Restaurant Hub** — one branded link per restaurant (`orderly.app/yourname`) + counter QR code. The universal entry from Instagram bio, Facebook, Google listing, website, and in-venue.
+2. **The WhatsApp engine** — per-tenant Evolution API instance; guests chat with *their* restaurant. Keyword router + AI concierge.
+3. **The owner dashboard** — bookings, guests, campaigns, reviews, insights, settings, billing.
+
+---
+
+## 6 · The 10 Pipelines · 54 Automations (updated)
+
+### Pipeline 1 · ACQUIRE
+| # | Automation | Trigger | Outcome |
+|---|---|---|---|
+| A1 | QR Code Join | Guest scans QR → texts JOIN | Profile created, 10 welcome points, welcome message |
+| A2 | WhatsApp Enquiry Capture | Unknown number messages | Lead created, AI asks date/party/occasion, manager notified, booking link sent |
+| A3 | Catering Lead Capture | Message contains "catering" | Catering lead, collects count/budget/location/date, 24h + 72h follow-ups |
+| A4 | Event/Function Booking | Birthday/corporate/private event mentioned | Event lead, requirements, quote, follow-up every 3 days |
+| A5 | Referral Reward | Referral link used | Referrer +15, new joiner +10, both notified |
+
+### Pipeline 2 · CONVERT
+| # | Automation | Trigger | Outcome |
+|---|---|---|---|
+| B1 | Reservation Confirmation | Booking created | Confirmation + calendar + parking + dress code + location + allergy/birthday questions |
+| B2 | No-Show Prevention 48h | 48h before | Reminder sent |
+| B3 | No-Show Prevention 24h | 24h before | Second reminder |
+| B4 | No-Show Prevention 6h | 6h before | Confirm attendance; no reply → table to waitlist |
+| B5 | Abandoned Booking Recovery | Drops off mid-booking | Follow-up at 2h and 24h with slots |
+| B6 | Waitlist Fill | Table frees up | Matches waitlisted party, sends "a table just opened" |
+
+### Pipeline 3 · DELIGHT
+| # | Automation | Trigger | Outcome |
+|---|---|---|---|
+| C1 | VIP Recognition | VIP number detected | Manager alerted with name, visits, preferred table/wine/waiter |
+| C2 | Birthday Automation | Stored birthday | Birthday message + free dessert + book button |
+| C3 | Anniversary Automation | Stored anniversary | Congrats 7 days before, offers usual table |
+| C4 | Pre-Arrival Upsell | Reservation confirmed | Wine pairing, dessert, private room, champagne, flowers |
+| C5 | First-Visit Recognition | First visit logged | +5 bonus points, "lovely to meet you" |
+| C6 | Chef's Table Invite | Lifetime spend ≥ R2,000 | Tagged high_roller, exclusive invite, manager notified |
+
+### Pipeline 4 · LOYALTY
+| # | Automation | Trigger | Outcome |
+|---|---|---|---|
+| D1 | JOIN | Texts JOIN | Profile, 10 welcome points, welcome message |
+| D2 | BALANCE | Texts BALANCE/POINTS | Points + cheapest reward + points needed |
+| D3 | REDEEM | Texts REDEEM | Claim token, reward event (15-min expiry), GPS link |
+| D4 | GPS-Gated Claim | Opens link + grants location | Within 500m → deduct points, mark claimed, confirm |
+| D5 | Automatic VIP Upgrade | 10+ visits | Status → VIP, tag, congratulations |
+| D6 | STOP / Opt-Out | Texts STOP | Opted out, graceful goodbye, points preserved |
+| D7 | Redeem Reminder | Balance ≥ 50 points | "You have enough — text REDEEM when you're here" |
+| D8 | Auto-Reactivate | Opted-out guest messages | Status → active, "your points are still here" |
+
+### Pipeline 5 · MARKET
+| # | Automation | Trigger | Outcome |
+|---|---|---|---|
+| E1 | Fill Quiet Hours | Owner taps button | Audience count + ROI estimate, sends campaign, tracks redemptions |
+| E2 | Bring Back Lost Faces | Owner taps button | Targets at-risk/dormant, win-back + bonus points |
+| E3 | Reward VIPs | Owner taps button | Exclusive offer to VIPs, optionally pre-loaded reward |
+| E4 | Visited Twice → Invite Back | 2nd visit | "Come back this week for 5 bonus points" |
+| E5 | Loves Steak → Steak Night | Favourite dish = steak | Steak-night invite with table offer |
+| E6 | Friday Regular → Thursday Special | Always Fridays | Thursday special nudge |
+
+### Pipeline 6 · RECOVER
+| # | Automation | Trigger | Outcome |
+|---|---|---|---|
+| F1 | At-Risk 30 days | Inactive 30 days | Status → at_risk, "we miss you" + 10 points |
+| F2 | Escalation 45 days | Inactive 45 days | "Dessert on us" + 20 points |
+| F3 | Dormant 60 days | Inactive 60 days | Status → dormant, manager personal contact |
+| F4 | Reactivation on Return | Dormant/at-risk visits | Status → active, "your points are waiting" |
+
+### Pipeline 7 · OPTIMISE
+| # | Automation | Trigger | Outcome |
+|---|---|---|---|
+| G1 | Smart Fill Quiet Hours | Owner taps | AI targets only likely guests (within 5km, day-matched) |
+| G2 | Sudden Empty Tables | N tables free tonight | Flash-fills nearby regulars |
+| G3 | Weather-Triggered Campaign | Rain/cold forecast | Promotes delivery/soup/coffee/comfort food |
+| G4 | Payday Premium Push | 25th of month | Premium menu campaign |
+| G5 | End-of-Month Budget | Last day of month | Budget-friendly offers |
+| G6 | Special Occasion Launch | Valentine's/Mother's Day/etc | Auto themed campaign |
+
+### Pipeline 8 · OPERATIONS
+| # | Automation | Trigger | Outcome |
+|---|---|---|---|
+| H1 | Daily Manager Brief | Every morning | Bookings, VIPs, birthdays, allergies, large groups, revenue, empty tables |
+| H2 | Opening Checklist | Before opening | Kitchen/bar/cleaning/manager tasks, alerts if incomplete |
+| H3 | Low-Stock Reorder Alert | Stock hits threshold | Supplier notified, purchase request created |
+| H4 | Supplier Order Approved | Manager approves | Supplier notified automatically |
+| H5 | Checklist Overdue Alert | Not done on time | Manager notified |
+
+### Pipeline 9 · REVIEWS
+| # | Automation | Trigger | Outcome |
+|---|---|---|---|
+| I1 | Post-Meal Review Request | 2h after meal | "How was everything today?" |
+| I2 | Positive → Google | 4–5 stars | Google review link |
+| I3 | Negative → Private | 1–3 stars | Private feedback + immediate manager alert |
+| I4 | Daily Feedback Summary | Every morning | AI summary, dashboard updated, complaints flagged |
+
+### Pipeline 10 · INTELLIGENCE
+| # | Automation | Trigger | Outcome |
+|---|---|---|---|
+| J1 | Weekly Insights | Monday 6am | Wins, top campaigns, underperformers, exactly 3 recommendations |
+| J2 | Monday Revenue Brief | Monday morning | Revenue recovered, new/recovered customers, VIPs, reviews + AI recs |
+| J3 | Underperformer Detection | Weekly | Flags campaigns to pause or tweak |
+| J4 | Status Recalculation | Daily | ≥10 visits → VIP; >60d → dormant; >30d → at_risk; else active |
+
+**Totals:** 54 automations across 10 pipelines. Loyalty = 8 (15%). The other 85% is bookings, concierge, campaigns, recovery, reviews, operations, and intelligence.
+
+---
+
+## 7 · App Pages (detailed)
+
+### Owner-facing dashboard (authenticated)
+| Page | Purpose | Key elements |
+|---|---|---|
+| **Dashboard** | Morning command centre | Today's covers, joins, redemptions; live activity feed; WhatsApp connection status; empty-slot alert; quick actions (send campaign, new booking) |
+| **Reservations** | Manage the book | Day/week view, confirm/seat/complete/no-show/cancel, party details, allergies, VIP flags, upsell prompts, waitlist |
+| **Guests** | The CRM | Searchable guest list, status segments (active/at-risk/dormant/VIP/opted-out), points, visit history, preferences, timeline |
+| **Campaigns** | Fill chairs | Campaign history + 3-step Promo Builder (goal → message → audience + ROI estimate), send, performance |
+| **Reviews** | Reputation control | Feedback feed, sentiment split, Google-routed vs private, respond to complaints |
+| **Insights** | Plain-English coaching | Weekly wins, top/underperforming campaigns, exactly 3 recommendations. Zero charts |
+| **Concierge** | AI configuration | Per-tenant knowledge base editor (parking, hours, halal, pets, menu), booking handoff rules |
+| **Operations** | Run the restaurant | Daily checklists, inventory levels, purchase-order approvals |
+| **Settings** | Restaurant profile | Business details, WhatsApp connection (QR), rewards catalogue, billing, Smart Page link + QR download |
+| **Billing** | Subscription | Trial countdown, 4 plan cards, PayFast checkout, payment history |
+
+### Super Admin (platform owner)
+| Page | Purpose |
+|---|---|
+| **Prospects** | CSV upload of restaurant leads, send WhatsApp invites, claim-link status |
+| **Tenants** | All restaurants, status, plan, health |
+| **Broadcasts** | Platform-wide announcements to all tenants |
+| **Webhooks Log** | Live Evolution + PayFast event debugging |
+
+### Customer-facing (public, no login)
+| Page | Purpose |
+|---|---|
+| **Restaurant Hub** (`/r/:slug`) | Branded entry: Book, Menu, Join Rewards, Chat AI, Directions, Call, Birthday Club, Today's Specials |
+| **Geo-Claim** (`/geo-claim/:token`) | GPS-verified reward unlock with cashier QR |
+| **Claim Page** (`/claim/:token`) | Owner onboarding from invite |
+
+---
+
+## 8 · User Journeys
+
+### Restaurant Owner
+1. **Discovery** — sees Orderly (referral/founder outreach), lands on homepage, requests an invite.
+2. **Invite** — Super Admin uploads them as a prospect, sends a WhatsApp invite with a branded claim link.
+3. **Claim & onboard** — opens claim link, names the restaurant, connects their WhatsApp by scanning a QR (14-day trial starts).
+4. **First value** — downloads their Smart Page link + counter QR; Orderly drafts their first "Fill Quiet Hours" campaign.
+5. **Daily loop** — reads the morning brief; confirms bookings; taps one button to fill a slow night; sees redemptions land.
+6. **Weekly loop** — Monday plain-English insights tell them what worked and what to do next.
+7. **Expand** — upgrades tier to unlock bookings/concierge/reviews/operations as needs grow.
+8. **Pay** — PayFast recurring billing; webhook confirms; trial converts to active.
+
+### Customer (guest)
+1. **Entry** — scans the counter QR, taps the Instagram-bio link, or texts the restaurant.
+2. **Join** — texts `JOIN` or taps "Join Rewards" on the Hub → profile + 10 welcome points, no app.
+3. **Engage** — texts `BOOK` to reserve, `BALANCE` to check points, asks the AI concierge questions.
+4. **Redeem in-venue** — texts `REDEEM`, opens the GPS link at the restaurant, cashier scans the QR.
+5. **Return** — receives birthday offers, win-backs, and quiet-hour invites; climbs to VIP.
+6. **Review** — gets a post-meal check-in; happy → Google; unhappy → resolved privately.
+
+---
+
+## 9 · Feature List (consolidated)
+
+**Core platform:** multi-tenant SaaS · per-tenant branded WhatsApp number · Restaurant Hub (one link + QR) · no-app guest experience · AI concierge · invite-only onboarding · Super Admin · PayFast billing.
+
+**Guest features:** loyalty points, rewards catalogue, GPS-gated redemption, bookings + confirmations + reminders, birthday/anniversary recognition, review requests, referral rewards.
+
+**Owner features:** dashboard, reservation management, guest CRM, campaign builder + ROI estimate, reviews control, operations checklists, inventory reorder, daily brief, weekly insights, billing.
+
+**AI layer:** concierge (grounded Q&A + booking), sentiment analysis, smart campaign targeting, plain-English insight generation.
+
+---
+
+## 10 · ROI & Value Proposition
+
+**Conservative model — a 20-table restaurant, avg R220/head, ~2.2 heads/table (~R480/table):**
+
+| Lever | Assumption | Monthly impact |
+|---|---|---|
+| Quiet-hour fill | +4 extra tables/week | ~R8,300 |
+| No-show recovery | 2 saved bookings/month | ~R960 |
+| Win-back recovery | 3 returned guests/month | ~R1,440 |
+| **Total conservative uplift** | | **~R10,700/mo** |
+| **Cost (Growth plan)** | | **R499/mo** |
+| **ROI** | | **~21x** |
+
+**The simple line:** Growth costs R499/month ≈ R125/week. **One extra filled table (~R480) pays for roughly four weeks of the subscription.** Every additional table, saved no-show, and returned regular is upside.
+
+**The Empty Chair framing for sales:** *"An empty chair earns R0. Orderly turns the chairs you're not using into revenue — usually paying for itself in the first week."*
+
+---
+
+## 11 · Benefits
+
+**For the owner:** fuller dining room on slow days; fewer no-shows; regulars back before they're lost; no missed enquiries; reputation protected; decisions in plain English; no new software to learn; one subscription vs. a stack of tools.
+
+**For the customer:** nothing to download or remember; instant booking and answers; rewards that actually work; feels recognised (birthdays, VIP); their chat is with the restaurant they love.
+
+**For the platform (you):** founder-led, high-trust onboarding; per-tenant WhatsApp = strong switching cost; tiered pricing scales with value delivered; land-and-expand from loyalty into the full OS.
+
+---
+
+## 12 · Pricing & Business Model
+
+| Tier | Price | Unlocks (pipeline mapping) |
+|---|---|---|
+| Starter | R299/mo | Loyalty (4) + simple campaigns (5) |
+| Growth | R499/mo | + Market, Recover, Intelligence (5, 6, 10) |
+| Professional | R1,499/mo | + Acquire, Convert, Delight, Reviews, Concierge (1, 2, 3, 9) |
+| Premium | R2,999/mo | + Operations (8), AI targeting, multi-location |
+
+Payments via **PayFast** recurring billing; webhook (IPN) is the source of truth, with signature, source-IP, amount, and server-callback checks.
+
+---
+
+## 13 · Technical Architecture (NAHALABS stack)
+
+- **Framework:** Next.js App Router + TypeScript strict
+- **UI:** Tailwind CSS + shadcn/ui
+- **Auth:** Clerk (owners + super admin)
+- **Database:** Neon PostgreSQL + Drizzle ORM (`drizzle-kit push`), `tenant_id` on every table
+- **WhatsApp:** Evolution API — one instance per tenant; **Global key for lifecycle only, per-tenant token for sending** (never mixed)
+- **AI:** Vercel AI SDK (concierge, sentiment, insights) — grounded, tools call services
+- **Payments:** PayFast behind a typed client
+- **Files:** Vercel Blob
+- **Deploy:** Vercel; cron via Vercel Cron + GitHub Actions wake-up for Render/Evolution
+
+> Supersedes the earlier Supabase/Vite spec in the Flavourly knowledge base.
+
+---
+
+## 14 · Acquisition Model
+
+Invite-only, founder-led. No public self-serve signup. Super Admin uploads prospects → sends WhatsApp invite → branded claim page → owner claims → 14-day trial → converts via PayFast. The homepage CTA ("Request an invite") feeds the Super Admin Prospects queue.
+
+---
+
+## 15 · Roadmap
+
+1. **Now:** finish core (loyalty, campaigns, concierge, bookings) → deploy → first end-to-end test.
+2. **Next:** Restaurant Hub (Smart Page + channel attribution) → PayFast sandbox test → first real restaurant.
+3. **Then:** Reviews + Operations + Intelligence depth; multi-location; expand to cafes/bars.
+
+---
+
+## 16 · Risks & Mitigations
+
+| Risk | Mitigation |
+|---|---|
+| PayFast untested | Sandbox transaction end-to-end before first client |
+| Evolution API reliability / cold starts | Render wake-up cron; graceful degradation |
+| WhatsApp ToS / number bans | Per-tenant instances, rate-limited sends, no spam |
+| Positioning confusion (loyalty vs OS) | Sell the outcome (full restaurant); loyalty as one engine |
+| Overbuilding before first client | Founder-led onboarding; ship the wedge, expand on demand |
+
+---
+
+## 17 · Success Metrics
+
+- Activations: claimed restaurants → WhatsApp connected → first campaign sent
+- Guest joins per restaurant per month
+- Campaign redemption rate
+- No-show rate before/after
+- Guests recovered (F1–F4)
+- MRR, churn, trial-to-paid conversion
+- Time-to-first-value (invite → first campaign sent)
+
+---
+
+## 18 · Open Questions
+
+1. Confirm the **R1,499 / R2,999 tiers** are real before publishing the homepage.
+2. Is **Orderly** the final name (domain, trademarks)?
+3. Does the Restaurant Hub ship in v1, or post-launch?
+4. Multi-location support — Starter limitation or Premium feature?
+
+---
+
+That's the homepage component and the full PRD. Want me to write the **`/api/v1/invite-requests` route** the homepage form needs, or the **Restaurant Hub page** (`/r/:slug`) next?

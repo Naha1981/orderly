@@ -1,0 +1,855 @@
+Both built. The loyalty handlers close the points loop (JOIN earns a bonus, visits earn points, BALANCE shows them, REDEEM spends them), and the Super Admin layer gives you tenant oversight, CSV prospect intake, platform broadcasts, and a webhook debug log.
+
+---
+
+# Feature 1 · Loyalty handlers + earn-on-visit
+
+## 1 · Loyalty service (JOIN / BALANCE / STOP / earn-on-visit)
+
+```ts
+// src/modules/loyalty/service.ts
+import { db } from '@/lib/db';
+import { guests, tenants, loyaltyTransactions, rewardsCatalog, reservations } from '@/lib/db/schema';
+import { eq, and, asc } from 'drizzle-orm';
+import { sendMessageToGuest } from '@/modules/whatsapp/send';
+
+export const JOIN_BONUS_POINTS = 10;
+export const EARN_CENTS_PER_POINT = 1000; // 1 point per R10 spent
+export const FLAT_VISIT_POINTS = 5;       // fallback when no spend is captured
+
+async function findGuestByPhone(tenantId: string, phone: string) {
+  if (!db) return null;
+  const [g] = await db.select().from(guests)
+    .where(and(eq(guests.tenantId, tenantId), eq(guests.phone, phone))).limit(1);
+  return g ?? null;
+}
+
+async function getCurrency(tenantId: string): Promise<string> {
+  if (!db) return 'Points';
+  const [t] = await db.select({ currencyName: tenants.currencyName }).from(tenants).where(eq(tenants.id, tenantId)).limit(1);
+  return t?.currencyName ?? 'Points';
+}
+
+/* ── JOIN ───────────────────────────────────────────────────────────── */
+export async function handleJoin(tenantId: string, phone: string) {
+  if (!db) throw new Error('DATABASE_NOT_CONFIGURED');
+  const currency = await getCurrency(tenantId);
+  const [tenant] = await db.select().from(tenants).where(eq(tenants.id, tenantId)).limit(1);
+  const existing = await findGuestByPhone(tenantId, phone);
+
+  if (existing) {
+    if (existing.status === 'opted_out') {
+      await db.update(guests).set({ status: 'active', optedOutAt: null }).where(eq(guests.id, existing.id));
+      await sendMessageToGuest(tenantId, phone,
+        `Welcome back! 🎉 You're re-joined with ${existing.pointsBalance} ${currency} still saved. Text BALANCE anytime.`,
+        { guestId: existing.id, handledBy: 'keyword' });
+      return { status: 'reactivated' };
+    }
+    await sendMessageToGuest(tenantId, phone,
+      `You're already in! You have ${existing.pointsBalance} ${currency}. Text BALANCE to check, REDEEM to claim a reward.`,
+      { guestId: existing.id, handledBy: 'keyword' });
+    return { status: 'already_member' };
+  }
+
+  const [guest] = await db.insert(guests).values({
+    tenantId, phone, status: 'active',
+    pointsBalance: JOIN_BONUS_POINTS,
+    totalVisits: 0, totalSpent: 0,
+    joinedAt: new Date(), source: 'whatsapp',
+  }).returning();
+
+  await db.insert(loyaltyTransactions).values({
+    tenantId, guestId: guest.id, type: 'join_bonus',
+    points: JOIN_BONUS_POINTS, description: 'Welcome bonus for joining',
+  });
+
+  await sendMessageToGuest(tenantId, phone,
+    `Welcome to ${tenant?.name ?? 'our rewards'}! 🎉 You've joined and earned ${JOIN_BONUS_POINTS} ${currency} to start. Text BALANCE to check your points, or REDEEM to claim a reward.`,
+    { guestId: guest.id, handledBy: 'keyword' });
+  return { status: 'joined', guestId: guest.id };
+}
+
+/* ── BALANCE ────────────────────────────────────────────────────────── */
+export async function handleBalance(tenantId: string, phone: string) {
+  if (!db) throw new Error('DATABASE_NOT_CONFIGURED');
+  const currency = await getCurrency(tenantId);
+  const guest = await findGuestByPhone(tenantId, phone);
+
+  if (!guest) {
+    await sendMessageToGuest(tenantId, phone,
+      `You're not in yet! Text JOIN to start earning ${currency}. 😊`,
+      { handledBy: 'keyword' });
+    return { status: 'not_member' };
+  }
+
+  const rewards = await db.select().from(rewardsCatalog)
+    .where(and(eq(rewardsCatalog.tenantId, tenantId), eq(rewardsCatalog.isActive, true)))
+    .orderBy(asc(rewardsCatalog.pointsCost));
+
+  const affordable = rewards.filter((r) => r.pointsCost <= guest.pointsBalance);
+  const next = rewards.find((r) => r.pointsCost > guest.pointsBalance) ?? null;
+
+  let msg = `You have ${guest.pointsBalance} ${currency}. ⭐`;
+  if (affordable.length) {
+    msg += `\n\nYou can REDEEM: ${affordable.map((r) => r.name).join(', ')}.`;
+  } else if (next) {
+    msg += `\n\n${next.pointsCost - guest.pointsBalance} more to unlock "${next.name}". Keep visiting!`;
+  }
+
+  await sendMessageToGuest(tenantId, phone, msg, { guestId: guest.id, handledBy: 'keyword' });
+  return { status: 'sent' };
+}
+
+/* ── STOP ───────────────────────────────────────────────────────────── */
+export async function handleStop(tenantId: string, phone: string) {
+  if (!db) throw new Error('DATABASE_NOT_CONFIGURED');
+  const guest = await findGuestByPhone(tenantId, phone);
+
+  if (!guest) {
+    await sendMessageToGuest(tenantId, phone, `You're not subscribed, so you're all set. 👍`, { handledBy: 'keyword' });
+    return { status: 'not_member' };
+  }
+
+  await db.update(guests).set({ status: 'opted_out', optedOutAt: new Date() }).where(eq(guests.id, guest.id));
+  await sendMessageToGuest(tenantId, phone,
+    `You're opted out. We'll miss you! Your points are saved if you ever come back. Text JOIN anytime to rejoin. 💛`,
+    { guestId: guest.id, handledBy: 'keyword' });
+  return { status: 'opted_out' };
+}
+
+/* ── EARN ON VISIT ──────────────────────────────────────────────────── */
+export async function earnPointsForVisit(tenantId: string, guestId: string, amountSpentCents?: number) {
+  if (!db) throw new Error('DATABASE_NOT_CONFIGURED');
+  const [guest] = await db.select().from(guests)
+    .where(and(eq(guests.id, guestId), eq(guests.tenantId, tenantId))).limit(1);
+  if (!guest) return { earned: 0 };
+
+  let earned: number;
+  let description: string;
+  if (amountSpentCents && amountSpentCents > 0) {
+    earned = Math.max(1, Math.floor(amountSpentCents / EARN_CENTS_PER_POINT));
+    description = `Earned from visit (R${Math.round(amountSpentCents / 100)} spent)`;
+  } else {
+    earned = FLAT_VISIT_POINTS;
+    description = 'Visit bonus';
+  }
+
+  await db.insert(loyaltyTransactions).values({ tenantId, guestId, type: 'earn', points: earned, description });
+  const newBalance = guest.pointsBalance + earned;
+  await db.update(guests).set({
+    pointsBalance: newBalance,
+    totalVisits: (guest.totalVisits ?? 0) + 1,
+    lastVisitAt: new Date(),
+    totalSpent: (guest.totalSpent ?? 0) + (amountSpentCents ?? 0),
+  }).where(eq(guests.id, guestId));
+
+  const currency = await getCurrency(tenantId);
+  try {
+    await sendMessageToGuest(tenantId, guest.phone,
+      `Thanks for visiting! 🎉 You just earned ${earned} ${currency}. New balance: ${newBalance} ${currency}. Text REDEEM to claim a reward.`,
+      { guestId, handledBy: 'automation' });
+  } catch (e) {
+    console.warn('[loyalty] earn notify failed', e);
+  }
+  return { earned, newBalance };
+}
+
+/* ── COMPLETE A VISIT (marks reservation completed + awards points) ─── */
+export async function completeVisitAndEarn(tenantId: string, reservationId: string, amountSpentCents?: number) {
+  if (!db) throw new Error('DATABASE_NOT_CONFIGURED');
+  const [reservation] = await db.select().from(reservations)
+    .where(and(eq(reservations.id, reservationId), eq(reservations.tenantId, tenantId))).limit(1);
+  if (!reservation) throw new Error('RESERVATION_NOT_FOUND');
+  if (reservation.status === 'completed') return { alreadyCompleted: true };
+
+  await db.update(reservations).set({ status: 'completed', completedAt: new Date() })
+    .where(eq(reservations.id, reservationId));
+
+  if (!reservation.guestId) return { completed: true, earned: 0 };
+  const earnResult = await earnPointsForVisit(tenantId, reservation.guestId, amountSpentCents);
+  return { completed: true, ...earnResult };
+}
+```
+
+## 2 · Complete-visit route (the earn trigger)
+
+```ts
+// src/app/api/v1/reservations/[id]/complete/route.ts
+import { NextResponse } from 'next/server';
+import { requireTenantContext } from '@/shared/utils/tenant-context';
+import { completeVisitAndEarn } from '@/modules/loyalty/service';
+
+export async function POST(request: Request, { params }: { params: Promise<{ id: string }> }) {
+  try {
+    const { tenant } = await requireTenantContext();
+    const { id } = await params;
+    const body = await request.json().catch(() => ({}));
+    const amountSpentCents = typeof body.amountSpentCents === 'number' ? body.amountSpentCents : undefined;
+    const result = await completeVisitAndEarn(tenant.id, id, amountSpentCents);
+    return NextResponse.json(result);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'INTERNAL';
+    const status = msg === 'UNAUTHORIZED' ? 401 : msg === 'NO_TENANT' ? 403 : msg === 'RESERVATION_NOT_FOUND' ? 404 : 500;
+    return NextResponse.json({ error: { code: msg } }, { status });
+  }
+}
+```
+
+## 3 · Router — point the loyalty keywords at the service
+
+In `src/modules/concierge/router.ts`:
+
+```ts
+import { handleJoin, handleBalance, handleStop } from '@/modules/loyalty/service';
+import { processRedeem } from '@/modules/rewards/service';
+// ...
+if (up === 'JOIN' || up.startsWith('JOIN ')) return handleJoin(tenantId, phone);
+if (up === 'BALANCE' || up === 'POINTS') return handleBalance(tenantId, phone);
+if (up === 'REDEEM' || up.startsWith('REDEEM')) return processRedeem(tenantId, phone);
+if (up === 'STOP' || up === 'UNSUBSCRIBE' || up === 'OPT OUT') return handleStop(tenantId, phone);
+```
+
+> Points loop is now closed: JOIN → join bonus · completed visit → earn · BALANCE → view · REDEEM → spend.
+
+---
+
+# Feature 2 · Super Admin Layer
+
+## 4 · Schema additions
+
+```ts
+// src/lib/db/schema.ts — add if not present
+export const prospects = pgTable('prospects', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  businessName: varchar('business_name', { length: 255 }).notNull(),
+  phone: varchar('phone', { length: 32 }).notNull(),
+  email: varchar('email', { length: 255 }),
+  industry: varchar('industry', { length: 80 }),
+  status: varchar('status', { length: 20 }).notNull().default('new'), // new|invited|claimed|rejected
+  claimToken: varchar('claim_token', { length: 64 }).unique(),
+  invitedAt: timestamp('invited_at'),
+  tenantId: uuid('tenant_id'),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+});
+
+export const webhookEvents = pgTable('webhook_events', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  source: varchar('source', { length: 40 }).notNull(), // evolution|payfast
+  eventType: varchar('event_type', { length: 120 }),
+  tenantId: uuid('tenant_id'),
+  rawPayload: jsonb('raw_payload'),
+  processed: boolean('processed').notNull().default(false),
+  error: text('error'),
+  createdAt: timestamp('created_at').notNull().defaultNow(),
+});
+```
+Then `drizzle-kit push`. Make yourself super admin:
+```sql
+UPDATE profiles SET role = 'super_admin' WHERE clerk_id = '<your clerk user id>';
+```
+
+## 5 · Super-admin guard + webhook logger
+
+```ts
+// src/shared/utils/super-admin.ts
+import { auth } from '@clerk/nextjs/server';
+import { db } from '@/lib/db';
+import { profiles } from '@/lib/db/schema';
+import { eq, and } from 'drizzle-orm';
+
+export async function requireSuperAdmin() {
+  if (!db) throw new Error('DATABASE_NOT_CONFIGURED');
+  const { userId } = await auth();
+  if (!userId) throw new Error('UNAUTHORIZED');
+  const [profile] = await db.select().from(profiles)
+    .where(and(eq(profiles.clerkId, userId), eq(profiles.role, 'super_admin')))
+    .limit(1);
+  if (!profile) throw new Error('FORBIDDEN');
+  return profile;
+}
+```
+
+```ts
+// src/lib/webhooks/log.ts
+import { db } from '@/lib/db';
+import { webhookEvents } from '@/lib/db/schema';
+
+export async function logWebhookEvent(input: {
+  source: string; eventType?: string; tenantId?: string;
+  rawPayload?: unknown; processed?: boolean; error?: string;
+}) {
+  if (!db) return;
+  try {
+    await db.insert(webhookEvents).values({
+      source: input.source,
+      eventType: input.eventType ?? null,
+      tenantId: input.tenantId ?? null,
+      rawPayload: input.rawPayload ?? null,
+      processed: input.processed ?? false,
+      error: input.error ?? null,
+    });
+  } catch (e) {
+    console.error('[webhooks] log failed', e);
+  }
+}
+```
+
+Wire `logWebhookEvent` into your Evolution webhook (after parsing, before routing) and PayFast IPN so the viewer has data:
+```ts
+await logWebhookEvent({ source: 'evolution', eventType: body.event, tenantId: tenant?.id, rawPayload: body, processed: true });
+```
+
+## 6 · Super Admin API routes
+
+```ts
+// src/app/api/v1/admin/tenants/route.ts
+import { NextResponse } from 'next/server';
+import { db } from '@/lib/db';
+import { tenants } from '@/lib/db/schema';
+import { desc } from 'drizzle-orm';
+import { requireSuperAdmin } from '@/shared/utils/super-admin';
+
+export async function GET() {
+  try {
+    await requireSuperAdmin();
+    const all = await db.select().from(tenants).orderBy(desc(tenants.createdAt));
+    return NextResponse.json({ tenants: all });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'INTERNAL';
+    const status = msg === 'UNAUTHORIZED' ? 401 : msg === 'FORBIDDEN' ? 403 : 500;
+    return NextResponse.json({ error: { code: msg } }, { status });
+  }
+}
+```
+
+```ts
+// src/app/api/v1/admin/prospects/route.ts  (list)
+import { NextResponse } from 'next/server';
+import { db } from '@/lib/db';
+import { prospects } from '@/lib/db/schema';
+import { desc } from 'drizzle-orm';
+import { requireSuperAdmin } from '@/shared/utils/super-admin';
+
+export async function GET() {
+  try {
+    await requireSuperAdmin();
+    const all = await db.select().from(prospects).orderBy(desc(prospects.createdAt)).limit(500);
+    return NextResponse.json({ prospects: all });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'INTERNAL';
+    const status = msg === 'UNAUTHORIZED' ? 401 : msg === 'FORBIDDEN' ? 403 : 500;
+    return NextResponse.json({ error: { code: msg } }, { status });
+  }
+}
+```
+
+```ts
+// src/app/api/v1/admin/prospects/upload/route.ts  (CSV)
+import { NextResponse } from 'next/server';
+import crypto from 'crypto';
+import { db } from '@/lib/db';
+import { prospects } from '@/lib/db/schema';
+import { eq } from 'drizzle-orm';
+import { requireSuperAdmin } from '@/shared/utils/super-admin';
+
+function normalizePhone(raw: string): string {
+  let d = raw.replace(/\D/g, '');
+  if (d.startsWith('0')) d = '27' + d.slice(1);
+  return d;
+}
+function splitCsvLine(line: string): string[] {
+  const out: string[] = []; let cur = ''; let inQ = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === '"') { if (inQ && line[i + 1] === '"') { cur += '"'; i++; } else inQ = !inQ; }
+    else if (c === ',' && !inQ) { out.push(cur); cur = ''; }
+    else cur += c;
+  }
+  out.push(cur);
+  return out;
+}
+function parseCsv(text: string) {
+  const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
+  if (!lines.length) return [];
+  const header = splitCsvLine(lines[0]).map((h) => h.trim().toLowerCase());
+  const nameIdx = header.findIndex((h) => ['business_name','business name','businessname','name','restaurant'].includes(h));
+  const phoneIdx = header.findIndex((h) => ['phone','phone number','phonenumber','mobile','number'].includes(h));
+  const emailIdx = header.findIndex((h) => ['email','e-mail'].includes(h));
+  const industryIdx = header.findIndex((h) => ['industry','type','category'].includes(h));
+  const rows = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cols = splitCsvLine(lines[i]);
+    rows.push({
+      businessName: nameIdx >= 0 ? (cols[nameIdx] ?? '').trim() : '',
+      phone: phoneIdx >= 0 ? (cols[phoneIdx] ?? '').trim() : '',
+      email: emailIdx >= 0 ? (cols[emailIdx] ?? '').trim() : '',
+      industry: industryIdx >= 0 ? (cols[industryIdx] ?? '').trim() : '',
+    });
+  }
+  return rows;
+}
+
+export async function POST(request: Request) {
+  try {
+    await requireSuperAdmin();
+    if (!db) return NextResponse.json({ error: { code: 'DATABASE_NOT_CONFIGURED' } }, { status: 503 });
+
+    const file = (await request.formData()).get('file') as File | null;
+    if (!file) return NextResponse.json({ error: { code: 'NO_FILE' } }, { status: 400 });
+
+    const rows = parseCsv(await file.text());
+    let created = 0, skipped = 0;
+    for (const row of rows) {
+      if (!row.businessName || !row.phone) { skipped++; continue; }
+      const phone = normalizePhone(row.phone);
+      const [existing] = await db.select({ id: prospects.id }).from(prospects).where(eq(prospects.phone, phone)).limit(1);
+      if (existing) { skipped++; continue; }
+      await db.insert(prospects).values({
+        businessName: row.businessName, phone,
+        email: row.email || null, industry: row.industry || null,
+        status: 'new', claimToken: crypto.randomUUID(),
+      });
+      created++;
+    }
+    return NextResponse.json({ created, skipped });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'INTERNAL';
+    const status = msg === 'UNAUTHORIZED' ? 401 : msg === 'FORBIDDEN' ? 403 : 500;
+    return NextResponse.json({ error: { code: msg } }, { status });
+  }
+}
+```
+
+```ts
+// src/app/api/v1/admin/broadcast/route.ts
+import { NextResponse } from 'next/server';
+import { db } from '@/lib/db';
+import { tenants } from '@/lib/db/schema';
+import { inArray } from 'drizzle-orm';
+import { z } from 'zod';
+import { requireSuperAdmin } from '@/shared/utils/super-admin';
+import { sendMessageToOwner } from '@/modules/whatsapp/send';
+
+export async function POST(request: Request) {
+  try {
+    await requireSuperAdmin();
+    if (!db) return NextResponse.json({ error: { code: 'DATABASE_NOT_CONFIGURED' } }, { status: 503 });
+
+    const parsed = z.object({ message: z.string().min(1).max(2000) }).safeParse(await request.json().catch(() => null));
+    if (!parsed.success) return NextResponse.json({ error: { code: 'VALIDATION' } }, { status: 400 });
+
+    const active = await db.select({ id: tenants.id }).from(tenants)
+      .where(inArray(tenants.status, ['trial', 'active']));
+
+    let sent = 0, failed = 0;
+    for (const t of active) {
+      try {
+        const res = await sendMessageToOwner(t.id, parsed.data.message, { handledBy: 'automation' });
+        if (res.success) sent++; else failed++;
+      } catch { failed++; }
+    }
+    return NextResponse.json({ sent, failed, total: active.length });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'INTERNAL';
+    const status = msg === 'UNAUTHORIZED' ? 401 : msg === 'FORBIDDEN' ? 403 : 500;
+    return NextResponse.json({ error: { code: msg } }, { status });
+  }
+}
+```
+
+```ts
+// src/app/api/v1/admin/webhooks/route.ts
+import { NextResponse } from 'next/server';
+import { db } from '@/lib/db';
+import { webhookEvents } from '@/lib/db/schema';
+import { desc, eq, and } from 'drizzle-orm';
+import { requireSuperAdmin } from '@/shared/utils/super-admin';
+
+export async function GET(request: Request) {
+  try {
+    await requireSuperAdmin();
+    if (!db) return NextResponse.json({ error: { code: 'DATABASE_NOT_CONFIGURED' } }, { status: 503 });
+    const url = new URL(request.url);
+    const source = url.searchParams.get('source');
+    const limit = Math.min(parseInt(url.searchParams.get('limit') ?? '50', 10), 200);
+    const events = await db.select().from(webhookEvents)
+      .where(source ? and(eq(webhookEvents.source, source)) : undefined)
+      .orderBy(desc(webhookEvents.createdAt))
+      .limit(limit);
+    return NextResponse.json({ events });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : 'INTERNAL';
+    const status = msg === 'UNAUTHORIZED' ? 401 : msg === 'FORBIDDEN' ? 403 : 500;
+    return NextResponse.json({ error: { code: msg } }, { status });
+  }
+}
+```
+
+## 7 · Super Admin UI
+
+```tsx
+// src/app/admin/layout.tsx
+import { redirect } from 'next/navigation';
+import { requireSuperAdmin } from '@/shared/utils/super-admin';
+import { AdminNav } from '@/components/admin/admin-nav';
+
+export const dynamic = 'force-dynamic';
+
+export default async function AdminLayout({ children }: { children: React.ReactNode }) {
+  try { await requireSuperAdmin(); } catch { redirect('/'); }
+  return (
+    <div className="min-h-screen bg-[#16110d] text-[#f5efe6]">
+      <AdminNav />
+      <main className="mx-auto max-w-5xl px-6 py-8">{children}</main>
+    </div>
+  );
+}
+```
+
+```tsx
+// src/components/admin/admin-nav.tsx
+'use client';
+import Link from 'next/link';
+import { usePathname } from 'next/navigation';
+
+const links = [
+  { href: '/admin', label: 'Overview' },
+  { href: '/admin/tenants', label: 'Tenants' },
+  { href: '/admin/prospects', label: 'Prospects' },
+  { href: '/admin/broadcast', label: 'Broadcast' },
+  { href: '/admin/webhooks', label: 'Webhooks' },
+];
+
+export function AdminNav() {
+  const pathname = usePathname();
+  return (
+    <nav className="border-b border-white/5 bg-[#1a140f]">
+      <div className="mx-auto flex max-w-5xl flex-wrap items-center gap-x-6 gap-y-2 px-6 py-4">
+        <span className="font-semibold text-[#e8722a]">Super Admin</span>
+        {links.map((l) => (
+          <Link key={l.href} href={l.href}
+            className={`text-sm transition-colors ${pathname === l.href ? 'text-white' : 'text-[#a89b8a] hover:text-white'}`}>
+            {l.label}
+          </Link>
+        ))}
+      </div>
+    </nav>
+  );
+}
+```
+
+```tsx
+// src/app/admin/page.tsx  (overview)
+import Link from 'next/link';
+import { db } from '@/lib/db';
+import { tenants, prospects, webhookEvents } from '@/lib/db/schema';
+import { sql } from 'drizzle-orm';
+
+export const dynamic = 'force-dynamic';
+
+export default async function AdminOverview() {
+  let counts = { tenants: 0, prospects: 0, webhooks: 0 };
+  if (db) {
+    const [t] = await db.select({ c: sql<number>`count(*)::int` }).from(tenants);
+    const [p] = await db.select({ c: sql<number>`count(*)::int` }).from(prospects);
+    const [w] = await db.select({ c: sql<number>`count(*)::int` }).from(webhookEvents);
+    counts = { tenants: t?.c ?? 0, prospects: p?.c ?? 0, webhooks: w?.c ?? 0 };
+  }
+  const cards = [
+    { href: '/admin/tenants', label: 'Tenants', value: counts.tenants, desc: 'All restaurants on the platform' },
+    { href: '/admin/prospects', label: 'Prospects', value: counts.prospects, desc: 'CSV intake + invite pipeline' },
+    { href: '/admin/broadcast', label: 'Broadcast', value: null, desc: 'Message all active restaurants' },
+    { href: '/admin/webhooks', label: 'Webhooks', value: counts.webhooks, desc: 'Debug Evolution + PayFast events' },
+  ];
+  return (
+    <div className="grid gap-4 md:grid-cols-2">
+      {cards.map((c) => (
+        <Link key={c.href} href={c.href} className="rounded-2xl border border-white/5 bg-[#211a13] p-6 transition hover:border-[#e8722a]/40">
+          <div className="flex items-center justify-between">
+            <h2 className="text-lg font-semibold">{c.label}</h2>
+            {c.value != null && <span className="text-2xl font-bold text-[#e8722a]">{c.value}</span>}
+          </div>
+          <p className="mt-1 text-sm text-[#a89b8a]">{c.desc}</p>
+        </Link>
+      ))}
+    </div>
+  );
+}
+```
+
+```tsx
+// src/app/admin/tenants/page.tsx
+import { TenantsClient } from '@/components/admin/tenants-client';
+export const dynamic = 'force-dynamic';
+export default function TenantsPage() { return <TenantsClient />; }
+```
+
+```tsx
+// src/components/admin/tenants-client.tsx
+'use client';
+import { useQuery } from '@tanstack/react-query';
+
+const statusStyle: Record<string, string> = {
+  active: 'bg-emerald-500/15 text-emerald-400',
+  trial: 'bg-amber-500/15 text-amber-400',
+  suspended: 'bg-red-500/15 text-red-400',
+};
+
+export function TenantsClient() {
+  const { data, isLoading } = useQuery({
+    queryKey: ['admin-tenants'],
+    queryFn: () => fetch('/api/v1/admin/tenants').then((r) => r.json()),
+  });
+  const tenants = data?.tenants ?? [];
+
+  if (isLoading) return <p className="text-sm text-[#a89b8a]">Loading tenants…</p>;
+
+  return (
+    <div className="overflow-hidden rounded-xl border border-white/5">
+      <table className="w-full text-left text-sm">
+        <thead className="bg-[#1a140f] text-xs uppercase text-[#7c6f5f]">
+          <tr>
+            <th className="px-4 py-3">Restaurant</th>
+            <th className="px-4 py-3">Plan</th>
+            <th className="px-4 py-3">WhatsApp</th>
+            <th className="px-4 py-3">Status</th>
+            <th className="px-4 py-3">Joined</th>
+          </tr>
+        </thead>
+        <tbody>
+          {tenants.length === 0 && (
+            <tr><td colSpan={5} className="px-4 py-8 text-center text-[#7c6f5f]">No tenants yet.</td></tr>
+          )}
+          {tenants.map((t: any) => (
+            <tr key={t.id} className="border-t border-white/5">
+              <td className="px-4 py-3">
+                <p className="font-medium">{t.name}</p>
+                <p className="text-xs text-[#7c6f5f]">{t.cuisine ?? '—'} · /r/{t.slug}</p>
+              </td>
+              <td className="px-4 py-3 capitalize">{t.plan ?? '—'}</td>
+              <td className="px-4 py-3">{t.whatsappConnected ? '✅ connected' : '—'}</td>
+              <td className="px-4 py-3">
+                <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${statusStyle[t.status] ?? 'bg-white/10 text-[#a89b8a]'}`}>{t.status}</span>
+              </td>
+              <td className="px-4 py-3 text-[#a89b8a]">{t.createdAt ? new Date(t.createdAt).toLocaleDateString() : '—'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+```
+
+```tsx
+// src/app/admin/prospects/page.tsx
+import { ProspectsClient } from '@/components/admin/prospects-client';
+export const dynamic = 'force-dynamic';
+export default function ProspectsPage() { return <ProspectsClient />; }
+```
+
+```tsx
+// src/components/admin/prospects-client.tsx
+'use client';
+import { useRef } from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { Button } from '@/components/ui/button';
+import { toast } from 'sonner';
+import { Upload, Loader2 } from 'lucide-react';
+
+export function ProspectsClient() {
+  const qc = useQueryClient();
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['admin-prospects'],
+    queryFn: () => fetch('/api/v1/admin/prospects').then((r) => r.json()),
+  });
+  const prospects = data?.prospects ?? [];
+
+  const upload = useMutation({
+    mutationFn: async (file: File) => {
+      const fd = new FormData();
+      fd.append('file', file);
+      const res = await fetch('/api/v1/admin/prospects/upload', { method: 'POST', body: fd });
+      if (!res.ok) throw new Error();
+      return res.json();
+    },
+    onSuccess: (d) => {
+      qc.invalidateQueries({ queryKey: ['admin-prospects'] });
+      toast.success(`Added ${d.created} prospects (${d.skipped} skipped)`);
+    },
+    onError: () => toast.error('Upload failed'),
+  });
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center gap-3">
+        <input ref={fileRef} type="file" accept=".csv,text/csv" className="hidden"
+          onChange={(e) => e.target.files?.[0] && upload.mutate(e.target.files[0])} />
+        <Button onClick={() => fileRef.current?.click()} disabled={upload.isPending} className="bg-[#e8722a] hover:bg-[#f0823a]">
+          {upload.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
+          Upload CSV
+        </Button>
+        <p className="text-xs text-[#7c6f5f]">Columns: business_name, phone, email, industry</p>
+      </div>
+
+      <div className="overflow-hidden rounded-xl border border-white/5">
+        <table className="w-full text-left text-sm">
+          <thead className="bg-[#1a140f] text-xs uppercase text-[#7c6f5f]">
+            <tr>
+              <th className="px-4 py-3">Business</th>
+              <th className="px-4 py-3">Phone</th>
+              <th className="px-4 py-3">Industry</th>
+              <th className="px-4 py-3">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {isLoading && <tr><td colSpan={4} className="px-4 py-8 text-center text-[#7c6f5f]">Loading…</td></tr>}
+            {!isLoading && prospects.length === 0 && (
+              <tr><td colSpan={4} className="px-4 py-8 text-center text-[#7c6f5f]">No prospects yet — upload a CSV.</td></tr>
+            )}
+            {prospects.map((p: any) => (
+              <tr key={p.id} className="border-t border-white/5">
+                <td className="px-4 py-3 font-medium">{p.businessName}</td>
+                <td className="px-4 py-3 text-[#a89b8a]">{p.phone}</td>
+                <td className="px-4 py-3 text-[#a89b8a]">{p.industry ?? '—'}</td>
+                <td className="px-4 py-3"><span className="rounded-full bg-white/10 px-2 py-0.5 text-xs">{p.status}</span></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+```
+
+```tsx
+// src/app/admin/broadcast/page.tsx
+import { BroadcastClient } from '@/components/admin/broadcast-client';
+export const dynamic = 'force-dynamic';
+export default function BroadcastPage() { return <BroadcastClient />; }
+```
+
+```tsx
+// src/components/admin/broadcast-client.tsx
+'use client';
+import { useState } from 'react';
+import { useMutation } from '@tanstack/react-query';
+import { Button } from '@/components/ui/button';
+import { Textarea } from '@/components/ui/textarea';
+import { toast } from 'sonner';
+import { Send, Loader2 } from 'lucide-react';
+
+export function BroadcastClient() {
+  const [message, setMessage] = useState('');
+  const send = useMutation({
+    mutationFn: async () => {
+      const res = await fetch('/api/v1/admin/broadcast', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message }),
+      });
+      if (!res.ok) throw new Error();
+      return res.json();
+    },
+    onSuccess: (d) => { toast.success(`Sent to ${d.sent} of ${d.total} restaurants (${d.failed} failed)`); setMessage(''); },
+    onError: () => toast.error('Broadcast failed'),
+  });
+
+  return (
+    <div className="max-w-2xl space-y-4">
+      <p className="text-sm text-[#a89b8a]">
+        Sends a WhatsApp message to the owner of every active restaurant. Use sparingly.
+      </p>
+      <Textarea rows={5} placeholder="Write your announcement…" value={message}
+        onChange={(e) => setMessage(e.target.value)}
+        className="border-white/10 bg-[#211a13]" />
+      <Button onClick={() => message && send.mutate()} disabled={send.isPending || !message}
+        className="bg-[#e8722a] hover:bg-[#f0823a]">
+        {send.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Send className="mr-2 h-4 w-4" />}
+        Broadcast to all
+      </Button>
+    </div>
+  );
+}
+```
+
+```tsx
+// src/app/admin/webhooks/page.tsx
+import { WebhooksClient } from '@/components/admin/webhooks-client';
+export const dynamic = 'force-dynamic';
+export default function WebhooksPage() { return <WebhooksClient />; }
+```
+
+```tsx
+// src/components/admin/webhooks-client.tsx
+'use client';
+import { useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
+
+export function WebhooksClient() {
+  const [source, setSource] = useState('');
+  const { data, isLoading, refetch } = useQuery({
+    queryKey: ['admin-webhooks', source],
+    queryFn: () => fetch(`/api/v1/admin/webhooks?limit=100${source ? `&source=${source}` : ''}`).then((r) => r.json()),
+  });
+  const events = data?.events ?? [];
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-3">
+        <select value={source} onChange={(e) => setSource(e.target.value)}
+          className="rounded-lg border border-white/10 bg-[#211a13] px-3 py-2 text-sm">
+          <option value="">All sources</option>
+          <option value="evolution">Evolution</option>
+          <option value="payfast">PayFast</option>
+        </select>
+        <button onClick={() => refetch()} className="text-sm text-[#e8722a] hover:underline">Refresh</button>
+      </div>
+
+      <div className="space-y-2">
+        {isLoading && <p className="text-sm text-[#a89b8a]">Loading…</p>}
+        {!isLoading && events.length === 0 && <p className="text-sm text-[#7c6f5f]">No webhook events yet.</p>}
+        {events.map((e: any) => (
+          <details key={e.id} className="rounded-xl border border-white/5 bg-[#211a13] px-4 py-3">
+            <summary className="flex cursor-pointer items-center gap-3 text-sm">
+              <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${e.source === 'evolution' ? 'bg-sky-500/15 text-sky-400' : 'bg-purple-500/15 text-purple-400'}`}>{e.source}</span>
+              <span className="font-medium">{e.eventType ?? 'event'}</span>
+              <span className={`rounded-full px-2 py-0.5 text-xs ${e.processed ? 'bg-emerald-500/15 text-emerald-400' : 'bg-amber-500/15 text-amber-400'}`}>
+                {e.processed ? 'processed' : 'pending'}
+              </span>
+              {e.error && <span className="text-xs text-red-400">{e.error}</span>}
+              <span className="ml-auto text-xs text-[#7c6f5f]">{e.createdAt ? new Date(e.createdAt).toLocaleString() : ''}</span>
+            </summary>
+            <pre className="mt-3 overflow-x-auto rounded-lg bg-[#16110d] p-3 text-xs text-[#a89b8a]">
+              {JSON.stringify(e.rawPayload, null, 2)}
+            </pre>
+          </details>
+        ))}
+      </div>
+    </div>
+  );
+}
+```
+
+> Add `/admin(.*)` to your Clerk protected routes in the middleware so unauthenticated visitors bounce to login.
+
+---
+
+## Wiring & verify
+
+1. `drizzle-kit push` (adds `prospects`, `webhook_events`). Set your own profile to `super_admin` via the SQL above.
+2. **Loyalty loop:** text `JOIN` → welcome + 10 points. Mark a reservation complete via `POST /api/v1/reservations/<id>/complete` with `{ "amountSpentCents": 45000 }` → guest earns 45 points + a notification. Text `BALANCE` → see points + next reward. Text `STOP` → opted out.
+3. **Super Admin:** visit `/admin` → see counts. Upload a CSV on `/admin/prospects` → rows appear. Open `/admin/tenants` → list renders. Send a broadcast → confirm delivery count. Trigger a WhatsApp message → see it in `/admin/webhooks` (after wiring `logWebhookEvent`).
+
+## Honest notes & follow-ups
+
+- **Broadcast sends from each tenant's own WhatsApp number** to their owner (reuses the gateway). A dedicated platform sender number is a cleaner follow-up.
+- **Broadcast is sequential** — fine for a handful of tenants, move to a queue at scale.
+- **CSV parser is built-in** (handles quoted fields). Swap to papaparse if you need more robust parsing.
+- **CSV upload isn't rate-limited** — it's super-admin-only, but consider a guard.
+- **REDEEM while opted-out:** decide whether STOPped guests can still redeem. Currently `processRedeem` doesn't block it — add a guard if you want.
+- **Prospect invite send** (WhatsApp the claim link) isn't built here — the CSV creates prospects with claim tokens; the actual invite-send is the natural next piece.
+
+Want me to build the **prospect invite flow** next (WhatsApp the claim link, flip status to invited, and the claim page that converts a prospect into a tenant), or the **campaigns/promos engine** (Fill Quiet Hours / Bring Back Lost / Reward VIPs with audience targeting and ROI estimates)?
