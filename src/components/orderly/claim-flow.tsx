@@ -3,9 +3,9 @@
 import { useState, useEffect } from 'react'
 import { apiPost } from '@/lib/api'
 import { Card, CardHeader, CardTitle, CardContent, Button, Input, Label, Select, Spinner } from '@/components/orderly/ui'
-import { MessageCircle, CheckCircle2, AlertCircle, ArrowRight } from 'lucide-react'
 import { INDUSTRIES } from '@/shared/types'
 import { useRouter } from 'next/navigation'
+import { MessageCircle, CheckCircle2, AlertCircle, ArrowRight } from 'lucide-react'
 import { toast } from 'sonner'
 
 type Prospect = {
@@ -61,9 +61,8 @@ export function ClaimFlow({ token }: { token: string }) {
     try {
       await apiPost('/api/v1/claim/submit', { token, ...form })
       setPhase('done')
-      toast.success('Account claimed!')
-      // Force a full reload so the auth cookie is picked up
-      setTimeout(() => router.push('/'), 1500)
+      toast.success('Restaurant claimed!')
+      setTimeout(() => router.push('/'), 2000)
     } catch (e: any) {
       toast.error(e?.message ?? 'Claim failed')
       setPhase('form')
@@ -105,9 +104,9 @@ export function ClaimFlow({ token }: { token: string }) {
         {phase === 'form' && prospect && (
           <Card>
             <CardHeader>
-              <CardTitle>Welcome, {prospect.contactName ?? 'there'}! Claim your restaurant</CardTitle>
+              <CardTitle>Welcome, {prospect.contactName ?? 'there'}! Claim {prospect.restaurantName}</CardTitle>
               <p className="text-sm text-muted-foreground">
-                You've been invited to join Orderly. Fill in your details to activate <span className="font-medium">{prospect.restaurantName}</span>.
+                You've been invited to join Orderly. Fill in your details to activate your restaurant.
               </p>
             </CardHeader>
             <CardContent>

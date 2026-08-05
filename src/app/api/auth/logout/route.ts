@@ -1,4 +1,4 @@
-// /api/auth/logout
+// /api/auth/logout — session logout
 import { NextResponse } from 'next/server'
 import { clearSessionCookie } from '@/lib/auth/session'
 

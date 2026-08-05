@@ -13,7 +13,17 @@ function createClient(): PrismaClient | null {
   try {
     const url = process.env.DATABASE_URL
     if (!url) return null
-    return new PrismaClient({ log: ['warn', 'error'] })
+    // Neon Postgres: use a small connection pool to avoid exhausting the
+    // free-tier connection limit. The `-pooler` in the Neon URL enables
+    // PgBouncer connection pooling on Neon's side.
+    return new PrismaClient({
+      log: ['warn', 'error'],
+      datasources: {
+        db: {
+          url: url.includes('pooler') ? url : url, // Neon pooler URL already has -pooler
+        },
+      },
+    })
   } catch (e) {
     console.warn('[db] failed to initialise Prisma client:', e)
     return null

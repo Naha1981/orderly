@@ -1,4 +1,4 @@
-// Orderly — auth context
+// Orderly — auth context (session-based)
 'use client'
 
 import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from 'react'
@@ -14,6 +14,9 @@ type Tenant = {
   trialEndsAt: string | null
   whatsappStatus: string
   whatsappPhone: string | null
+  slug: string | null
+  cuisine: string | null
+  currencyName: string
 }
 
 type User = {

@@ -141,10 +141,10 @@ export function Marketing({ onAuth }: { onAuth: (mode: 'login' | 'signup') => vo
             </Button>
             <Button
               size="sm"
-              onClick={scrollToInvite}
+              onClick={() => onAuth('signup')}
               className="bg-[#e8722a] hover:bg-[#f0823a] text-white"
             >
-              Request an invite
+              Start free trial
             </Button>
           </div>
         </div>
@@ -178,10 +178,10 @@ export function Marketing({ onAuth }: { onAuth: (mode: 'login' | 'signup') => vo
               <div className="mt-8 flex flex-wrap items-center gap-3">
                 <Button
                   size="lg"
-                  onClick={scrollToInvite}
+                  onClick={() => onAuth('signup')}
                   className="bg-[#e8722a] hover:bg-[#f0823a] text-white"
                 >
-                  Request an invite <ArrowRight className="h-4 w-4" />
+                  Start free trial <ArrowRight className="h-4 w-4" />
                 </Button>
                 <Button size="lg" variant="outline" onClick={scrollToPains}>
                   See how it fills your empty chairs
@@ -526,14 +526,14 @@ export function Marketing({ onAuth }: { onAuth: (mode: 'login' | 'signup') => vo
 
                   <Button
                     size="md"
+                    onClick={() => onAuth('signup')}
                     className={`mt-6 w-full ${
                       isPro
                         ? 'bg-[#e8722a] hover:bg-[#f0823a] text-white'
                         : 'bg-[#241c14] hover:bg-[#3a2e22] text-[#faf6f0]'
                     }`}
-                    onClick={scrollToInvite}
                   >
-                    Request an invite
+                    Start free trial
                   </Button>
                 </Card>
               )
@@ -586,7 +586,7 @@ export function Marketing({ onAuth }: { onAuth: (mode: 'login' | 'signup') => vo
                     className="mt-6 bg-[#e8722a] hover:bg-[#f0823a] text-white"
                     onClick={() => setInviteOpen(true)}
                   >
-                    Request an invite <ArrowRight className="h-4 w-4" />
+                    Fill in the form <ArrowRight className="h-4 w-4" />
                   </Button>
                 </div>
               ) : submitted ? (

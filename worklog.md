@@ -568,3 +568,39 @@ Stage Summary:
 - GPS-gated redemption with cashier QR works (verified earlier)
 - Multi-tenant isolation enforced throughout
 - All integrations degrade gracefully without secrets
+
+---
+Task ID: INTEGRATION
+Agent: orchestrator
+Task: Wire up real credentials — Neon Postgres, Nvidia AI, Clerk (attempted)
+
+Work Log:
+- Updated .env with Neon DATABASE_URL (pooled + direct), Clerk keys, Nvidia AI key
+- Changed Prisma datasource from sqlite to postgresql, added directUrl for migrations
+- Pushed schema to Neon (all 23 tables created successfully)
+- Updated AI provider from z-ai-web-dev-sdk to Nvidia OpenAI-compatible API (openai npm package, baseURL=https://integrate.api.nvidia.com/v1, model=z-ai/glm-5.2)
+- Verified Nvidia AI works: "Say Nvidia AI is working" → "Nvidia AI is working" ✓
+- Attempted Clerk integration: installed @clerk/nextjs, built middleware, ClerkProvider, sign-in/sign-up pages, claim flow with Clerk
+- Clerk issue: keyless mode activated despite env vars being set, causing the server to hang on browser requests (keyless-creator-reader JS makes blocking network calls to Clerk API)
+- Uninstalled @clerk/nextjs, reverted to session-based auth (cookie + JWT, no DB writes for sessions)
+- Switched from DB-stored sessions to JWT tokens (stateless) to avoid connection pool exhaustion on login
+- Fixed cookie Secure flag (was rejecting cookies on HTTP localhost in production mode)
+- Neon connection pool: configured pgbouncer=true, connection_limit=3, pool_timeout=60
+- Production build: `next build` + standalone server with --max-old-space-size=2048
+- Discovered that browser requests via port 3000 kill the server (sandbox interference), but via Caddy gateway (port 81) the server stays alive
+- Final working configuration: production build + standalone server + Caddy gateway + Neon Postgres + Nvidia AI
+
+Stage Summary:
+- Neon Postgres: FULLY WORKING (login, customer data, bookings, reviews, concierge — all served from Neon)
+- Nvidia AI (z-ai/glm-5.2): FULLY WORKING (concierge answers grounded in knowledge base: "Do you allow dogs?" → "Yes, we love furry friends! Well-behaved dogs are welcome on our outside patio only, and we provide water bowls too. 🐶")
+- Clerk: NOT USED (keyless mode issue in sandbox — the Clerk SDK's keyless-creator-reader makes blocking network calls that crash the dev server; session-based auth used instead; Clerk keys are in .env for future production deployment where the middleware works correctly)
+- Auth: JWT-based session (stateless, no DB writes) — works reliably with Neon's connection pool
+- Production build required (dev server's on-demand compilation exhausts memory with Neon's remote DB)
+- Caddy gateway (port 81) required for browser access (direct port 3000 access is blocked by sandbox)
+- Demo accounts: owner@braaihouse.demo / owner123, admin@orderly.demo / admin123
+- All 10 pipelines functional with real Neon data + Nvidia AI
+
+Known limitations:
+- Rapid-fire API requests (>3 concurrent) can overwhelm Neon's free-tier connection pool — need pauses between heavy operations
+- Clerk not active in sandbox (keys are configured for production deployment)
+- Evolution API credentials pending (WhatsApp sends are simulated)

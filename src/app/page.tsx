@@ -21,17 +21,14 @@ function Router() {
 
   const claimToken = searchParams.get('claim')
   const geoClaimToken = searchParams.get('geo-claim')
-  const billingReturn = searchParams.get('billing')
   const hubSlug = searchParams.get('hub')
   const hubSrc = searchParams.get('src') ?? undefined
+  const billingReturn = searchParams.get('billing')
 
-  // Public Restaurant Hub — rendered BEFORE auth check (it's a public page).
-  // Format: /?hub=restaurant-slug (optionally &src=qr_poster)
+  // Public flows
   if (hubSlug) {
     return <HubView slug={hubSlug} src={hubSrc} />
   }
-
-  // Public flows
   if (claimToken) {
     return <ClaimFlow token={claimToken} />
   }
@@ -65,7 +62,6 @@ function Router() {
 
   // Billing return cleanup
   if (billingReturn) {
-    // Strip the query param; the billing view shows status
     router.replace('/?view=settings')
   }
 

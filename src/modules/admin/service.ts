@@ -386,7 +386,6 @@ export async function claimTenant(
     const passwordHash = hashPassword(input.password)
 
     const result = await database.$transaction(async (tx) => {
-      // 1. Create the tenant
       const tenant = await tx.tenant.create({
         data: {
           name: input.restaurantName.trim(),
@@ -395,14 +394,11 @@ export async function claimTenant(
           plan: 'starter',
           planStatus: 'trial',
           trialEndsAt,
-          // Seed WhatsApp phone if provided — connection still requires
-          // Evolution instance provisioning (handled elsewhere).
           whatsappPhone: input.phone ? normalizePhone(input.phone) : null,
           currency: 'ZAR',
         },
       })
 
-      // 2. Create the owner user
       const user = await tx.user.create({
         data: {
           email: input.ownerEmail.toLowerCase().trim(),

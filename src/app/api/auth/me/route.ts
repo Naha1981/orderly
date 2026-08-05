@@ -1,6 +1,6 @@
-// /api/auth/me
+// /api/auth/me — return current user (session or Clerk)
 import { NextResponse } from 'next/server'
-import { getCurrentUser } from '@/lib/auth/session'
+import { getCurrentUser } from '@/shared/utils/tenant-context'
 
 export async function GET() {
   const user = await getCurrentUser()

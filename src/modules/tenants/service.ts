@@ -28,7 +28,6 @@ export async function createTenantWithOwner(
   input: OnboardInput,
 ): Promise<Result<{ tenantId: string; userId: string }>> {
   const database = requireDb()
-  // Check email isn't taken
   const existing = await database.user.findUnique({ where: { email: input.ownerEmail.toLowerCase() } })
   if (existing) return err('EMAIL_TAKEN')
 
