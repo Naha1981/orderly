@@ -18,15 +18,14 @@ export async function listCustomers(
   }
   const limit = Math.min(filters.limit ?? 50, 200)
   const offset = filters.offset ?? 0
-  const [items, total] = await Promise.all([
-    db.customer.findMany({
-      where,
-      orderBy: { createdAt: 'desc' },
-      take: limit,
-      skip: offset,
-    }),
-    db.customer.count({ where }),
-  ])
+  // Sequential queries to avoid exhausting Neon's connection pool
+  const items = await db.customer.findMany({
+    where,
+    orderBy: { createdAt: 'desc' },
+    take: limit,
+    skip: offset,
+  })
+  const total = await db.customer.count({ where })
   return { items, total }
 }
 
@@ -45,46 +44,39 @@ export async function getCustomerDetail(tenantId: string, customerId: string) {
 
 export async function getCustomerStats(tenantId: string) {
   if (!db) return null
-  const [total, active, atRisk, dormant, vip, optedOut, today, week] = await Promise.all([
-    db.customer.count({ where: { tenantId } }),
-    db.customer.count({ where: { tenantId, status: 'active' } }),
-    db.customer.count({ where: { tenantId, status: 'at_risk' } }),
-    db.customer.count({ where: { tenantId, status: 'dormant' } }),
-    db.customer.count({ where: { tenantId, status: 'vip' } }),
-    db.customer.count({ where: { tenantId, status: 'opted_out' } }),
-    db.customer.count({ where: { tenantId, joinedAt: { gte: new Date(new Date().setHours(0, 0, 0, 0)) } } }),
-    db.customer.count({
-      where: {
-        tenantId,
-        joinedAt: { gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
-      },
-    }),
-  ])
+  // Sequential queries to avoid exhausting Neon's connection pool
+  const total = await db.customer.count({ where: { tenantId } })
+  const active = await db.customer.count({ where: { tenantId, status: 'active' } })
+  const atRisk = await db.customer.count({ where: { tenantId, status: 'at_risk' } })
+  const dormant = await db.customer.count({ where: { tenantId, status: 'dormant' } })
+  const vip = await db.customer.count({ where: { tenantId, status: 'vip' } })
+  const optedOut = await db.customer.count({ where: { tenantId, status: 'opted_out' } })
+  const today = await db.customer.count({ where: { tenantId, joinedAt: { gte: new Date(new Date().setHours(0, 0, 0, 0)) } } })
+  const week = await db.customer.count({ where: { tenantId, joinedAt: { gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) } } })
   return { total, active, atRisk, dormant, vip, optedOut, joinedToday: today, joinedThisWeek: week }
 }
 
 export async function getRecentActivity(tenantId: string, limit = 20) {
   if (!db) return []
-  const [messages, redemptions, joins] = await Promise.all([
-    db.message.findMany({
-      where: { tenantId },
-      orderBy: { createdAt: 'desc' },
-      take: limit,
-      include: { customer: { select: { name: true, phone: true } } },
-    }),
-    db.rewardRedemption.findMany({
-      where: { tenantId, status: 'claimed' },
-      orderBy: { claimedAt: 'desc' },
-      take: limit,
-      include: { customer: { select: { name: true, phone: true } }, reward: { select: { name: true } } },
-    }),
-    db.customer.findMany({
-      where: { tenantId },
-      orderBy: { joinedAt: 'desc' },
-      take: limit,
-      select: { id: true, name: true, phone: true, joinedAt: true, source: true },
-    }),
-  ])
+  // Sequential queries to avoid exhausting Neon's connection pool
+  const messages = await db.message.findMany({
+    where: { tenantId },
+    orderBy: { createdAt: 'desc' },
+    take: limit,
+    include: { customer: { select: { name: true, phone: true } } },
+  })
+  const redemptions = await db.rewardRedemption.findMany({
+    where: { tenantId, status: 'claimed' },
+    orderBy: { claimedAt: 'desc' },
+    take: limit,
+    include: { customer: { select: { name: true, phone: true } }, reward: { select: { name: true } } },
+  })
+  const joins = await db.customer.findMany({
+    where: { tenantId },
+    orderBy: { joinedAt: 'desc' },
+    take: limit,
+    select: { id: true, name: true, phone: true, joinedAt: true, source: true },
+  })
   return {
     messages: messages.map((m) => ({
       type: 'message' as const,

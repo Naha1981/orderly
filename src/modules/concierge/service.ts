@@ -137,13 +137,34 @@ export async function answerWithConcierge(
     // 2. Build tools (scoped to this tenant + guest phone)
     const tools = buildConciergeTools(tenantId, guestPhone)
 
-    // 3-4. Pre-call always-relevant tools + knowledge in parallel
-    const [menuRes, businessRes, specialsRes, knowledgeRes] = await Promise.all([
-      tools.getMenu(),
-      tools.getBusinessInfo(),
-      tools.getSpecials(),
-      tools.searchKnowledge(message),
-    ])
+    // 3. Fetch ONLY the most relevant context based on the question type.
+    // This reduces DB queries from 5 to 1-2 to avoid Neon connection issues
+    // and keeps the total request time manageable (AI call alone is ~60s).
+    const lowerMsg = message.toLowerCase()
+    let menuRes: any = { error: 'not fetched' }
+    let businessRes: any = { error: 'not fetched' }
+    let specialsRes: any = { error: 'not fetched' }
+    let knowledgeRes: any = { found: false }
+
+    // Menu questions
+    if (/\b(menu|food|dish|eat|price|vegetarian|vegan|halal|gluten)\b/.test(lowerMsg)) {
+      menuRes = await tools.getMenu()
+      businessRes = await tools.getBusinessInfo()
+    }
+    // Hours/location/contact questions
+    else if (/\b(hour|open|close|time|where|address|location|phone|call|direction)\b/.test(lowerMsg)) {
+      businessRes = await tools.getBusinessInfo()
+    }
+    // Specials/deals questions
+    else if (/\b(special|deal|promotion|offer|happy hour)\b/.test(lowerMsg)) {
+      specialsRes = await tools.getSpecials()
+      businessRes = await tools.getBusinessInfo()
+    }
+    // Everything else — try knowledge base first, fall back to business info
+    else {
+      knowledgeRes = await tools.searchKnowledge(message)
+      businessRes = await tools.getBusinessInfo()
+    }
 
     // 5. Loyalty only when relevant AND we have a phone to look up
     let loyaltyContext: string | null = null

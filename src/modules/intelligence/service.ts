@@ -103,49 +103,29 @@ async function aggregateWeek(
       campaignsSent,
       campaignRedeemed,
       earnAgg,
-    ] = await Promise.all([
-      database.customer.count({
-        where: {
-          tenantId,
-          joinedAt: { gte: weekStart, lte: weekEnd },
-        },
-      }),
-      database.customer.count({
-        where: {
-          tenantId,
-          status: { in: ['active', 'at_risk', 'vip'] },
-        },
-      }),
-      database.rewardRedemption.count({
-        where: {
-          tenantId,
-          status: 'claimed',
-          claimedAt: { gte: weekStart, lte: weekEnd },
-        },
-      }),
-      database.campaign.count({
-        where: {
-          tenantId,
-          status: 'sent',
-          sentAt: { gte: weekStart, lte: weekEnd },
-        },
-      }),
-      database.campaignRecipient.count({
-        where: {
-          tenantId,
-          redeemed: true,
-          redeemedAt: { gte: weekStart, lte: weekEnd },
-        },
-      }),
-      database.loyaltyTransaction.aggregate({
-        where: {
-          tenantId,
-          type: 'earn',
-          createdAt: { gte: weekStart, lte: weekEnd },
-        },
+    ] = await (async () => {
+      // Sequential queries to avoid exhausting Neon's connection pool
+      const newJoins = await database.customer.count({
+        where: { tenantId, joinedAt: { gte: weekStart, lte: weekEnd } },
+      })
+      const activeCustomers = await database.customer.count({
+        where: { tenantId, status: { in: ['active', 'at_risk', 'vip'] } },
+      })
+      const redemptions = await database.rewardRedemption.count({
+        where: { tenantId, status: 'claimed', claimedAt: { gte: weekStart, lte: weekEnd } },
+      })
+      const campaignsSent = await database.campaign.count({
+        where: { tenantId, status: 'sent', sentAt: { gte: weekStart, lte: weekEnd } },
+      })
+      const campaignRedeemed = await database.campaignRecipient.count({
+        where: { tenantId, redeemed: true, redeemedAt: { gte: weekStart, lte: weekEnd } },
+      })
+      const earnAgg = await database.loyaltyTransaction.aggregate({
+        where: { tenantId, type: 'earn', createdAt: { gte: weekStart, lte: weekEnd } },
         _sum: { points: true },
-      }),
-    ])
+      })
+      return [newJoins, activeCustomers, redemptions, campaignsSent, campaignRedeemed, earnAgg]
+    })()
 
     const pointsPerRand = tenant.pointsPerRand || 1
     // Points earned / points-per-rand ratio = estimated ZAR spend through the

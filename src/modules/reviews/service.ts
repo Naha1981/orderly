@@ -278,16 +278,15 @@ export async function getReviewStats(
     return { positive: 0, neutral: 0, negative: 0, total: 0, avgRating: null }
   }
   try {
-    const [positive, neutral, negative, total, ratings] = await Promise.all([
-      db.review.count({ where: { tenantId, sentiment: 'positive' } }),
-      db.review.count({ where: { tenantId, sentiment: 'neutral' } }),
-      db.review.count({ where: { tenantId, sentiment: 'negative' } }),
-      db.review.count({ where: { tenantId } }),
-      db.review.findMany({
-        where: { tenantId, rating: { not: null } },
-        select: { rating: true },
-      }),
-    ])
+    // Sequential queries to avoid exhausting Neon's connection pool
+    const positive = await db.review.count({ where: { tenantId, sentiment: 'positive' } })
+    const neutral = await db.review.count({ where: { tenantId, sentiment: 'neutral' } })
+    const negative = await db.review.count({ where: { tenantId, sentiment: 'negative' } })
+    const total = await db.review.count({ where: { tenantId } })
+    const ratings = await db.review.findMany({
+      where: { tenantId, rating: { not: null } },
+      select: { rating: true },
+    })
 
     const avgRating =
       ratings.length > 0
