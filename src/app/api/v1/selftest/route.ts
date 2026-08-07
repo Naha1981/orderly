@@ -38,7 +38,9 @@ export async function GET() {
     ? { status: 'pass', detail: process.env.NEXT_PUBLIC_APP_URL }
     : { status: 'warn', detail: 'NEXT_PUBLIC_APP_URL unset' }
 
-  checks.aiProvider = { status: 'pass', detail: 'z-ai-web-dev-sdk auto-detected at runtime' }
+  checks.aiProvider = process.env.AI_API_KEY
+    ? { status: 'pass', detail: `${process.env.AI_MODEL || 'z-ai/glm-5.2'} via ${process.env.AI_BASE_URL || 'Nvidia'}` }
+    : { status: 'warn', detail: 'AI_API_KEY unset — concierge will use fallback replies' }
 
   const allOk = Object.values(checks).every((c) => c.status !== 'fail')
   return NextResponse.json({
