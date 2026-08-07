@@ -7,6 +7,7 @@ import { hashPassword } from '@/lib/security/password'
 import { INDUSTRIES } from '@/shared/types'
 import { MVP_RULES } from '@/modules/automation/rules.seed'
 import { serializeTrigger } from '@/modules/automation/engine'
+import { generateUniqueSlug } from '@/modules/tenants/service'
 
 export async function POST() {
   if (!db) return NextResponse.json({ error: 'db unavailable' }, { status: 503 })
@@ -34,6 +35,8 @@ export async function POST() {
     const ownerEmail = 'owner@braaihouse.demo'
     let owner = await db.user.findUnique({ where: { email: ownerEmail } })
     let tenantId: string
+    // Precompute the unique slug once so the create + re-run backfill agree.
+    const demoSlug = await generateUniqueSlug('The Braai House', db)
     if (!owner) {
       const industry = INDUSTRIES[0]
       const tenant = await db.tenant.create({
@@ -52,7 +55,7 @@ export async function POST() {
           phone: '0211234567',
           googleReviewUrl: 'https://g.page/r/example/review',
           smartPageConfig: JSON.stringify({ rating: 4.7, tagline: 'Cape Town\'s home of flame-grilled perfection', todaySpecials: 'Tonight: 500g Tomahawk steak for two — R450' }),
-          slug: 'braaihouse',
+          slug: demoSlug,
           plan: 'professional',
           planStatus: 'trial',
           trialEndsAt: new Date(Date.now() + 14 * 24 * 60 * 60 * 1000),
@@ -77,14 +80,14 @@ export async function POST() {
           tenantId,
         },
       })
-      report.push('created demo tenant: The Braai House (slug: braaihouse)')
+      report.push(`created demo tenant: The Braai House (slug: ${demoSlug})`)
       report.push('created owner: owner@braaihouse.demo / owner123')
     } else {
       tenantId = owner.tenantId!
       // Ensure tenant has slug + smartPageConfig even if seed re-run
       await db.tenant.updateMany({
         where: { id: tenantId, slug: null },
-        data: { slug: 'braaihouse', smartPageConfig: JSON.stringify({ rating: 4.7, tagline: 'Cape Town\'s home of flame-grilled perfection', todaySpecials: 'Tonight: 500g Tomahawk steak for two — R450' }) },
+        data: { slug: demoSlug, smartPageConfig: JSON.stringify({ rating: 4.7, tagline: 'Cape Town\'s home of flame-grilled perfection', todaySpecials: 'Tonight: 500g Tomahawk steak for two — R450' }) },
       })
       report.push('demo tenant + owner exist')
     }

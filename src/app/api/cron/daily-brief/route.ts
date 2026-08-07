@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { buildDailyBrief, formatDailyBriefForWhatsApp } from '@/modules/operations/daily-brief'
 import { sendMessage } from '@/modules/messaging/service'
+import { isWithinQuietHours } from '@/shared/utils/time'
 
 export async function POST(req: NextRequest) {
   const secret = process.env.CRON_SECRET
@@ -14,10 +15,13 @@ export async function POST(req: NextRequest) {
   }
   if (!db) return NextResponse.json({ error: 'db unavailable' }, { status: 503 })
 
-  // Quiet hours: only send between 6am and 10am
-  const hour = new Date().getHours()
-  if (hour < 6 || hour > 10) {
-    return NextResponse.json({ ok: true, skipped: 'outside_morning_window', sent: 0 })
+  // Quiet hours: no briefs before 7am or after 8pm Johannesburg time.
+  // (Previously this was a 6am–10am morning window; switched to the shared
+  // timezone-aware quiet-hours helper so all outbound crons share one
+  // definition of "sendable hours." If a narrower morning-only window is
+  // needed later, add a separate isWithinMorningWindow() helper.)
+  if (isWithinQuietHours()) {
+    return NextResponse.json({ ok: true, skipped: 'quiet_hours', sent: 0 })
   }
 
   const tenants = await db.tenant.findMany({

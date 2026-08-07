@@ -2,6 +2,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { z } from 'zod'
+import { rateLimit, getClientIp, HOUR_MS } from '@/lib/security/rate-limit'
 
 const schema = z.object({
   restaurantName: z.string().min(2).max(120),
@@ -11,6 +12,18 @@ const schema = z.object({
 })
 
 export async function POST(req: NextRequest) {
+  // Rate limit: 5 requests per IP per hour. This endpoint is a public
+  // prospect-intake form — the only thing a hostile client can do here is
+  // pollute the prospect pipeline, so a tight limit is appropriate.
+  const ip = getClientIp(req)
+  const rl = rateLimit(`invite-requests:${ip}`, 5, HOUR_MS)
+  if (!rl.allowed) {
+    return NextResponse.json(
+      { error: 'rate_limited', retryInMs: rl.retryInMs },
+      { status: 429, headers: { 'Retry-After': String(Math.ceil(rl.retryInMs / 1000)) } },
+    )
+  }
+
   if (!db) return NextResponse.json({ error: 'database unavailable' }, { status: 503 })
   try {
     const body = await req.json()

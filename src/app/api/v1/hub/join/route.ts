@@ -2,8 +2,22 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { handleJoin } from '@/modules/loyalty/service'
+import { rateLimit, getClientIp, HOUR_MS } from '@/lib/security/rate-limit'
 
 export async function POST(req: NextRequest) {
+  // Rate limit: 10 requests per IP per hour. The hub join page is a public
+  // acquisition surface; an unauthenticated client can otherwise create
+  // arbitrary customer rows + trigger WhatsApp sends (which cost money and
+  // can be abused for spam).
+  const ip = getClientIp(req)
+  const rl = rateLimit(`hub-join:${ip}`, 10, HOUR_MS)
+  if (!rl.allowed) {
+    return NextResponse.json(
+      { error: 'rate_limited', retryInMs: rl.retryInMs },
+      { status: 429, headers: { 'Retry-After': String(Math.ceil(rl.retryInMs / 1000)) } },
+    )
+  }
+
   if (!db) return NextResponse.json({ error: 'db unavailable' }, { status: 503 })
   try {
     const body = await req.json()

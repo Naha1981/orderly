@@ -1,0 +1,502 @@
+  1450→    │   │       └── client.ts
+  1451→    │   ├── webhooks/log.ts        # ✅ logWebhookEvent()
+  1452→    │   └── ai/provider.ts          # ○ RECOMMENDED — thin indirection over direct openai() calls
+  1453→    │
+  1454→    ├── shared/
+  1455→    │   ├── constants/
+  1456→    │   └── utils/
+  1457→    │       ├── tenant-context.ts   # ✅ requireTenantContext()
+  1458→    │       ├── super-admin.ts       # ✅ requireSuperAdmin()
+  1459→    │       └── geo.ts                # ○ RECOMMENDED — move haversineMeters() here from modules/rewards
+  1460→    │
+  1461→    └── components/
+  1462→        ├── ui/                       # shadcn/ui primitives
+  1463→        ├── marketing/invite-form.tsx
+  1464→        ├── hub/hub-client.tsx
+  1465→        ├── rewards/geo-claim-client.tsx
+  1466→        ├── claim/claim-client.tsx
+  1467→        ├── dashboard/  campaigns-client.tsx  menu-manager.tsx  hub-qr.tsx
+  1468→        ├── settings/
+  1469→        │   ├── concierge-settings.tsx   # teach (URL/PDF), learned sources, test box
+  1470→        │   ├── quick-answers.tsx
+  1471→        │   ├── whatsapp-connect.tsx
+  1472→        │   ├── restaurant-setup.tsx
+  1473→        │   ├── rewards-manager.tsx
+  1474→        │   └── billing-client.tsx
+  1475→        └── admin/
+  1476→            ├── admin-nav.tsx  tenants-client.tsx  prospects-client.tsx
+  1477→            ├── broadcast-client.tsx  webhooks-client.tsx
+  1478→
+  1479→Notes on this structure
+  1480→
+  1481→  - Every route handler's body is: authenticate → resolve tenant (or verify
+  1482→    super-admin, or verify webhook/cron secret) → validate → call a modules/*
+  1483→    function → respond. No exceptions found in the code reviewed — keep it that
+  1484→    way as new routes are added.
+  1485→  - modules/concierge/router.ts is the single dispatch point for every inbound
+  1486→    WhatsApp message. It is intentionally a plain, ordered function (plan.md
+  1487→    §10) — do not introduce a second routing mechanism elsewhere.
+  1488→  - modules/whatsapp/send.ts is the single outbound gateway. No module should
+  1489→    call the Evolution client directly for sending; only
+  1490→    lib/integrations/evolution/lifecycle.ts is called directly, and only from
+  1491→    tenant-connect and Super Admin flows.
+  1492→  - Two new modules recommended, not yet present: modules/recovery/ (Track C1)
+  1493→    and modules/delight/ (Track C3) — both are pure additions, no existing
+  1494→    module needs to change to accommodate them.
+  1495→  - The Restaurant Hub and its menu sub-page belong together (r/[slug]/ and
+  1496→    r/[slug]/menu/) but the menu page is the one visible gap in an otherwise
+  1497→    complete Hub.
+  1498→
+  1499→plan.md
+  1500→
+  1501→Orderly — Technical & Architecture Plan
+  1502→
+  1503→Version: 2.0 — full-system revision, reconciled against code already written
+  1504→Companion to: PRD.md (what to build), execution-plan.md (how to sequence it)
+  1505→Stack baseline: Node.js / Next.js — no Supabase, no FastAPI, no separate backend
+  1506→service
+  1507→
+  1508→1. Purpose & What Changed
+  1509→
+  1510→v1 of this plan specified a generic, data-driven automation rules engine (an
+  1511→automation_rules table, a condition evaluator, an action executor) as the
+  1512→mechanism for all 40+ automations. That is not how the system was actually
+  1513→built. The real implementation uses a direct, ordered router in code —
+  1514→routeInboundMessage() checks keywords, then booking state, then falls through to
+  1515→the AI concierge — with each automation living as a normal function in a normal
+  1516→service module, and scheduled automations as normal cron-triggered route
+  1517→handlers calling those same service functions.
+  1518→
+  1519→This version documents the architecture as it exists, keeps what's working, and
+  1520→makes concrete, incremental recommendations (not a rewrite) where the real
+  1521→implementation has gaps. Where v1's abstractions don't match reality, they're
+  1522→dropped.
+  1523→
+  1524→2. Architecture Philosophy
+  1525→
+  1526→Unchanged from v1, and consistently followed in the real code:
+  1527→
+  1528→  - Modular monolith, not microservices. One repository, one deployment, one
+  1529→    database, one auth provider, one WhatsApp provider.
+  1530→  - Organise by business capability. modules/loyalty/, modules/reservations/,
+  1531→    modules/campaigns/ — not generic controllers//services/ buckets.
+  1532→  - Thin routes, rich services. Every Route Handler's body is: authenticate →
+  1533→    resolve tenant → validate (Zod) → call a service function → return a
+  1534→    response. Confirmed consistently applied across the real code.
+  1535→  - Read secrets inside the function body, never at module load. This pattern
+  1536→    shows up repeatedly in the real implementation (Vercel Blob token, PayFast
+  1537→    credentials, Evolution keys) and is worth stating as a formal principle: a
+  1538→    missing credential should degrade a single request gracefully, never crash a
+  1539→    build or every request.
+  1540→  - Correctness and tenant safety first, velocity second, cost third.
+  1541→
+  1542→3. Locked Tech Stack
+  1543→
+  1544→| Layer                | Choice                                                                              | Notes from the real implementation                                                                                                                                                                                                                                                                                                                                                                                                              |
+  1545→| -------------------- | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  1546→| Framework            | Next.js (App Router) + TypeScript, strict                                           |                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+  1547→| Runtime              | Node.js 20 LTS                                                                      |                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+  1548→| UI                   | Tailwind CSS + shadcn/ui                                                            |                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+  1549→| Forms & validation   | React Hook Form + Zod                                                               |                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+  1550→| Client data fetching | TanStack Query                                                                      | Used throughout: campaigns, concierge settings, admin views                                                                                                                                                                                                                                                                                                                                                                                     |
+  1551→| Client state         | Zustand, only where server state is insufficient                                    |                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+  1552→| Database             | **Neon PostgreSQL**                                                                 | Also hosts **pgvector** for the knowledge base (`CREATE EXTENSION vector`)                                                                                                                                                                                                                                                                                                                                                                      |
+  1553→| ORM                  | **Drizzle ORM** + `drizzle-kit push`                                                |                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+  1554→| Auth                 | **Clerk**                                                                           | Claim flow embeds `<SignIn>`/`<SignUp>` inline via `routing="virtual"` rather than redirecting to separate pages — a deliberate implementation choice worth preserving                                                                                                                                                                                                                                                                          |
+  1555→| AI                   | **Vercel AI SDK**                                                                   | `generateText` (concierge replies), `generateObject` (booking-detail extraction), `embed`/`embedMany` (knowledge ingestion + retrieval). **Note:** the current implementation calls `openai(...)` directly at call sites rather than through a swappable provider abstraction — a minor deviation from the "provider-agnostic" principle, worth wrapping in a thin `lib/ai/provider.ts` indirection so a future model swap is a one-file change |
+  1556→| Embeddings           | OpenAI `text-embedding-3-small`                                                     | 1536 dimensions, stored in `knowledge_chunks.embedding`                                                                                                                                                                                                                                                                                                                                                                                         |
+  1557→| PDF parsing          | `unpdf`                                                                             | For menu/document uploads                                                                                                                                                                                                                                                                                                                                                                                                                       |
+  1558→| URL-to-text          | Jina Reader (`https://r.jina.ai/<url>`)                                             | Free third-party service — external dependency worth monitoring, has no SLA                                                                                                                                                                                                                                                                                                                                                                     |
+  1559→| WhatsApp             | **Evolution API**, self-hosted on Render                                            | One instance per tenant, plus a **separate platform instance** for Super Admin invites/broadcasts                                                                                                                                                                                                                                                                                                                                               |
+  1560→| Payments             | **PayFast**                                                                         | Order-preserved (Custom Integration) MD5 signature — confirmed correct scheme in the real code, not the REST API's alphabetical scheme                                                                                                                                                                                                                                                                                                          |
+  1561→| File storage         | Vercel Blob                                                                         | Logos                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+  1562→| QR generation        | `qrcode.react`                                                                      | Hub QR download, reward-claim cashier QR                                                                                                                                                                                                                                                                                                                                                                                                        |
+  1563→| CSV parsing          | Hand-rolled quoted-field parser (current)                                           | **Recommend swapping to `papaparse`** for robustness — flagged as a gap, not yet fixed                                                                                                                                                                                                                                                                                                                                                          |
+  1564→| Deployment           | **Vercel** (app)                                                                    |                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+  1565→| Background/cron      | GitHub Actions, every 30 minutes for reminders/reviews; daily for the manager brief |                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+  1566→| Version control      | GitHub                                                                              |                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+  1567→
+  1568→Explicitly rejected
+  1569→
+  1570→No Supabase, no FastAPI/Python backend, no separate Express/NestJS microservice,
+  1571→no workflow-canvas tool (n8n/Zapier/Make). All automations are code in this one
+  1572→repository.
+  1573→
+  1574→4. High-Level Architecture
+  1575→
+  1576→                         ┌───────────────────────────────────┐
+  1577→                         │           Vercel (Next.js)          │
+  1578→                         │                                      │
+  1579→  Browser (owner) ─────► │  App Router UI (dashboard, admin)   │
+  1580→  Browser (guest) ─────► │  Restaurant Hub  (/r/[slug])        │
+  1581→                         │  Route Handlers  (/api/v1/*)         │
+  1582→                         │  Webhooks (evolution, payfast)       │
+  1583→                         │  Cron dispatch  (/api/cron/*)        │
+  1584→                         └──────────────┬───────────────────────┘
+  1585→                                        │
+  1586→        ┌───────────────────────────────┼───────────────────────────────┐
+  1587→        │                               │                                │
+  1588→┌───────▼────────┐           ┌──────────▼─────────┐            ┌─────────▼─────────┐
+  1589→│ Neon Postgres    │           │  Clerk (Auth)        │            │  Vercel AI SDK      │
+  1590→│  + pgvector       │           │                      │            │  (concierge, booking │
+  1591→│  via Drizzle       │           │                      │            │   extraction, insight)│
+  1592→└────────────────┘           └──────────────────────┘            └────────────────────┘
+  1593→
+  1594→┌───────────────────┐   ┌────────────────────┐   ┌────────────────────┐   ┌───────────────────┐
+  1595→│ Evolution API       │   │ Evolution API        │   │     PayFast          │   │   Vercel Blob        │
+  1596→│ (per-tenant           │   │ (platform instance —  │   │  (billing, IPN=truth)│   │  (logos)             │
+  1597→│  instances, Render)   │   │  invites/broadcasts)   │   └────────────────────┘   └───────────────────┘
+  1598→└───────────────────┘   └────────────────────┘
+  1599→
+  1600→Inbound guest message → Evolution webhook → persist to webhook_events →
+  1601→  routeInboundMessage(): keywords → cancel/reschedule → confirm/waitlist-accept →
+  1602→  continue booking draft → new booking intent → review-reply capture →
+  1603→  AI concierge (tools + RAG) → hardcoded fallback menu
+  1604→
+  1605→GitHub Actions: reservation-reminders (30 min) · review-requests (30 min) ·
+  1606→  daily-brief (daily) · [recommended new] status-recalc (daily) ·
+  1607→  [recommended new] recovery-ladder (daily) · Evolution keep-warm ping
+  1608→
+  1609→5. Repository & Domain Architecture
+  1610→
+  1611→src/
+  1612→  app/
+  1613→    (marketing)/                 # public landing page
+  1614→    (app)/ or top-level pages    # dashboard/ campaigns/ setup/ menu/ settings/ billing/
+  1615→    admin/                       # Super Admin: overview, tenants, prospects, broadcast, webhooks
+  1616→    claim/[token]/                # invite-only onboarding (Clerk inline)
+  1617→    geo-claim/[token]/            # GPS-gated reward claim
+  1618→    r/[slug]/                     # Restaurant Hub (public)
+  1619→    r/[slug]/menu/                # public menu page — GAP, not yet built
+  1620→    api/
+  1621→      webhooks/evolution/          # inbound WhatsApp — verify → log → route
+  1622→      webhooks/payfast/            # IPN — 4-check validation
+  1623→      v1/                          # authenticated + public JSON API
+  1624→      cron/                        # secured scheduled entry points
+  1625→
+  1626→  modules/
+  1627→    tenants/                     # tenant CRUD, claim action, settings actions
+  1628→    guests/                      # guest CRUD (the "customers" table is named `guests`)
+  1629→    loyalty/                     # JOIN/BALANCE/STOP, earn-on-visit
+  1630→    rewards/                     # REDEEM, GPS claim validation, cashier verify
+  1631→    reservations/                # createReservation, cancelReservation, rescheduleReservation,
+  1632→                                  #   checkAvailability, markNoShow, completeReservation
+  1633→    bookings/                    # the AI booking engine: extraction, draft state machine,
+  1634→                                  #   cancel/reschedule/confirm-attendance orchestration
+  1635→    waitlist/                    # join, offer-freed-table, accept
+  1636→    reviews/                     # capture, sentiment routing
+  1637→    campaigns/                   # presets, audience builder, ROI estimate, send, attribution
+  1638→    concierge/                   # tools.ts, service.ts, router.ts (the AI + inbound router)
+  1639→    knowledge/                   # ingest (URL/PDF), reingest, delete, search (RAG)
+  1640→    operations/                  # daily-brief.ts (others are roadmap)
+  1641→    whatsapp/                    # send.ts (per-tenant + platform sends), lifecycle.ts (instance mgmt)
+  1642→    admin/ (or shared/utils/super-admin.ts)   # super-admin guard + cross-tenant reads
+  1643→
+  1644→  lib/
+  1645→    db/                          # nullable Drizzle client + full schema
+  1646→    integrations/
+  1647→      evolution/                 # split: lifecycle (Global key) vs send (per-tenant token)
+  1648→      payfast/                   # signature.ts (order-preserved MD5), plans.ts, client.ts
+  1649→    webhooks/log.ts              # logWebhookEvent() — the webhook_events writer
+  1650→    ai/provider.ts               # RECOMMENDED — thin indirection over the AI SDK provider
+  1651→
+  1652→  shared/
+  1653→    constants/
+  1654→    utils/
+  1655→      tenant-context.ts          # requireTenantContext()
+  1656→      super-admin.ts             # requireSuperAdmin()
+  1657→      geo.ts                     # RECOMMENDED — move haversineMeters() here from modules/rewards
+  1658→
+  1659→Module contract
+  1660→
+  1661→Unchanged principle: modules own their service functions and the tables they're
+  1662→primarily responsible for; cross-module calls happen through exported functions
+  1663→(sendMessageToGuest, checkAvailability, attributeRedemptionToCampaign), which is
+  1664→exactly the pattern already in use — modules/bookings calls
+  1665→modules/reservations, modules/rewards calls modules/campaigns' attribution
+  1666→function, etc.
+  1667→
+  1668→6. Multi-Tenancy Model
+  1669→
+  1670→Confirmed consistently applied in the real code: every service function takes
+  1671→tenantId explicitly as a parameter, and every query includes an explicit
+  1672→eq(table.tenantId, tenantId) (usually combined with the row's own id via
+  1673→and(...)).
+  1674→
+  1675→What's missing: a single, mandatory wrapper (scopedDb(tenantId)) that makes an
+  1676→unscoped query structurally impossible, and any Postgres RLS as a second,
+  1677→database-enforced layer. At ~20 tables and dozens of routes, manual discipline
+  1678→has held so far but doesn't scale indefinitely.
+  1679→
+  1680→Recommendation, in priority order:
+  1681→
+  1682→1.  Immediate: a lightweight lint rule or code-review checklist item — "does
+  1683→    this query include a tenant filter?" — since introducing the wrapper
+  1684→    retroactively across this much code is itself a project.
+  1685→2.  Before scaling tenant count meaningfully: introduce Postgres RLS policies on
+  1686→    the highest-risk tables (guests, loyalty_transactions, reservations,
+  1687→    payment-related fields) as defense-in-depth.
+  1688→3.  For any new module going forward: build it against a scopedDb() helper from
+  1689→    day one so the pattern doesn't keep compounding.
+  1690→
+  1691→7. Data Model
+  1692→
+  1693→Conceptual list, consolidated from the actual schema additions made across the
+  1694→build (Drizzle DDL is written in the codebase itself, not duplicated here).
+  1695→
+  1696→| Table                  | Purpose                                                                                                                                                                                                                                                                                                               |
+  1697→| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  1698→| `tenants`              | Restaurant profile: branding, slug, industry, cuisine, address, GPS, opening hours, capacity, avg spend, currency name, plan/status/trial, WhatsApp instance name+token+connected flag+phone, PayFast token, `smart_page_config` (rating/tagline/specials), `knowledge_base` (Quick Answers jsonb), Google review URL |
+  1699→| `profiles`             | Clerk-linked staff: `clerkId`, `tenantId`, role (owner/manager/staff/super\_admin), name, phone                                                                                                                                                                                                                       |
+  1700→| `guests`               | Loyalty + CRM record: phone, name, birthday, status, points balance, visits, spend, joined/last-visit/opted-out timestamps, allergies, source                                                                                                                                                                         |
+  1701→| `loyalty_transactions` | Append-only ledger: type (join\_bonus/earn/redeem/adjust), points, description                                                                                                                                                                                                                                        |
+  1702→| `rewards_catalog`      | Configurable rewards: name, points cost, active flag                                                                                                                                                                                                                                                                  |
+  1703→| `reward_events`        | GPS-gated claims: claim token, status, expiry, claimed-at, GPS coordinates at claim time                                                                                                                                                                                                                              |
+  1704→| `reservations`         | Bookings: date/time/party size, occasion, special requests, allergies, status, booking ref, source, reminder flags (48h/24h/6h), guest-confirmed flag, completed-at, review-requested-at                                                                                                                              |
+  1705→| `booking_drafts`       | AI booking-in-progress state: phone-scoped, TTL'd, fields filled in incrementally, `reschedule_of` link when rescheduling                                                                                                                                                                                             |
+  1706→| `waitlist`             | Waiting parties: phone, party size, preferred date/time, status, notified/expiry timestamps                                                                                                                                                                                                                           |
+  1707→| `reviews`              | Post-meal feedback: rating, sentiment, text, routing decision, manager-alerted flag                                                                                                                                                                                                                                   |
+  1708→| `campaigns`            | Owner campaigns: type/preset, message template, audience filter, audience count, status, sent-at, **real** redemption count + revenue                                                                                                                                                                                 |
+  1709→| `campaign_recipients`  | Per-send attribution record, used for last-touch (7-day window) redemption attribution                                                                                                                                                                                                                                |
+  1710→| `menu_items`           | Category, name, description, price, dietary tags, availability, sort order                                                                                                                                                                                                                                            |
+  1711→| `knowledge_sources`    | Ingested URL/PDF metadata: status (processing/ready/failed), error                                                                                                                                                                                                                                                    |
+  1712→| `knowledge_chunks`     | Embedded text chunks per source, `pgvector` embedding column                                                                                                                                                                                                                                                          |
+  1713→| `prospects`            | Super Admin invite pipeline: business name, phone, industry, status, claim token, invited-at, resulting tenant id                                                                                                                                                                                                     |
+  1714→| `webhook_events`       | Raw inbound payload audit: source, event type, tenant, processed flag, error                                                                                                                                                                                                                                          |
+  1715→
+  1716→Deferred/roadmap tables (not yet needed): dedicated operations_checklists,
+  1717→inventory_items, a payment_transactions table beyond the PayFast token already
+  1718→on tenants.
+  1719→
+  1720→8. The Messaging Gateway
+  1721→
+  1722→As designed and largely confirmed in the real code: sendMessageToGuest,
+  1723→sendMessageToOwner, and sendPlatformMessage in modules/whatsapp/send.ts are the
+  1724→only sanctioned paths to send an outbound message.
+  1725→
+  1726→  - sendMessageToGuest / sendMessageToOwner use the tenant's own Evolution
+  1727→    instance and per-tenant token.
+  1728→  - sendPlatformMessage uses a dedicated platform Evolution instance (separate
+  1729→    credentials: PLATFORM_INSTANCE_NAME/PLATFORM_INSTANCE_TOKEN/PLATFORM_PHONE)
+  1730→    — used only for Super Admin invites and broadcasts, so a tenant never
+  1731→    appears to message itself with platform content.
+  1732→  - Every send should log to a message/audit table and degrade gracefully (never
+  1733→    throw) on failure — this was the original design and should be verified
+  1734→    present on every call site as part of the assembly pass (execution-plan.md
+  1735→    Track A).
+  1736→
+  1737→Confirmed gaps against the original design intent: rate limiting (protecting a
+  1738→tenant's WhatsApp session from bulk-send bans) and retry-with-backoff on
+  1739→transient failures are not confirmed present in the code as shown. Campaign
+  1740→sends are currently sequential with no throttle — acceptable at pilot scale, a
+  1741→real risk once a tenant has hundreds of guests in one campaign.
+  1742→
+  1743→9. The AI Concierge
+  1744→
+  1745→Grounding rule (enforced by construction, confirmed in the real implementation):
+  1746→the model composes language; every fact comes from a tool call or the knowledge
+  1747→base.
+  1748→
+  1749→  - Quick Answers first. Structured facts (hours, parking, dress code,
+  1750→    dietary/halal, pets, wifi, kids, location, payment) live as jsonb on
+  1751→    tenants.knowledgeBase and are checked by a dedicated getQuickAnswers tool
+  1752→    before the model reaches for RAG — instant, reliable answers to the
+  1753→    questions guests ask most.
+  1754→  - Tools for structured, changing data. getMenu, getBusinessInfo, getSpecials,
+  1755→    getLoyaltyBalance query the live database directly — never RAG, so prices
+  1756→    and hours are never stale.
+  1757→  - RAG for unstructured knowledge. searchKnowledge embeds the guest's question
+  1758→    and retrieves the top-N most similar chunks from knowledge_chunks, scoped by
+  1759→    tenant_id. The knowledge ingestion pipeline (URL via Jina Reader, or PDF via
+  1760→    unpdf) chunks, embeds, and stores; a re-ingest path refreshes a URL source
+  1761→    when the underlying site changes.
+  1762→  - Transparency in testing. The Settings → Concierge test box shows not just
+  1763→    the answer but the exact snippets and similarity scores it used — a
+  1764→    genuinely good verification tool, worth keeping and eventually exposing (in
+  1765→    a limited form) to owners as ongoing trust-building.
+  1766→  - Failure mode: if the AI call errors for any reason, the router falls back to
+  1767→    a hardcoded keyword menu rather than leaving the guest unanswered —
+  1768→    confirmed present and correct.
+  1769→
+  1770→The booking sub-engine
+  1771→
+  1772→A distinct, more complex piece worth documenting on its own: generateObject
+  1773→extracts {date, time, partySize, occasion, specialRequests} from free text
+  1774→(resolving relative dates like "Friday" against the current date); a
+  1775→booking_drafts row persists partial progress across multiple messages with
+  1776→a 30-minute TTL; once all required fields are present, the deterministic
+  1777→modules/reservations service creates the real reservation (never the AI
+  1778→directly) and a confirmation is sent. Cancel and reschedule reuse the same draft
+  1779→mechanism (reschedule_of links a draft back to the reservation being changed).
+  1780→
+  1781→10. The Router
+  1782→
+  1783→As built: routeInboundMessage(tenantId, phone, text) is an ordered function, not
+  1784→a data-driven engine. Confirmed order, and the reasoning behind it:
+  1785→
+  1786→1.  Deterministic keywords: JOIN, BALANCE/POINTS, REDEEM, STOP/UNSUBSCRIBE,
+  1787→    WAITLIST
+  1788→2.  CANCEL / RESCHEDULE — checked before general booking-intent matching,
+  1789→    because phrases like "cancel my booking" contain a booking keyword and would
+  1790→    otherwise be mis-routed
+  1791→3.  CONFIRM / YES — tries waitlist-acceptance first, then
+  1792→    attendance-confirmation; falls through if neither applies
+  1793→4.  Continue an in-progress booking or reschedule draft
+  1794→5.  New booking intent (keyword-hint match)
+  1795→6.  Post-meal review-reply capture (only within a 48h window of a review
+  1796→    request)
+  1797→7.  Grounded AI concierge
+  1798→8.  Hardcoded fallback menu, on any concierge error
+  1799→
+  1800→Recommendation: keep this exact pattern — it is simple, debuggable, and each
+  1801→step is independently testable — but as more automations are added, extract each
+  1802→numbered step into a small named matcher function (already mostly true) with a
+  1803→single top-level ordered list, so the ordering rationale (like the
+  1804→CANCEL-before-booking-intent case) is documented in one place rather than
+  1805→implied by code position alone. This is not a recommendation to introduce a
+  1806→generic automation_rules table — that abstraction doesn't fit how deterministic
+  1807→these first several steps genuinely are, and would add indirection without a
+  1808→real benefit until (if ever) the router needs to be edited by non-developers.
+  1809→
+  1810→11. Scheduled Jobs
+  1811→
+  1812→| Job                                              | Cadence                       | Confirmed status                                                                                                                                                                                           |
+  1813→| ------------------------------------------------ | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  1814→| `reservation-reminders`                          | Every 30 min (GitHub Actions) | Built — idempotent via `reminder_48h/24h/6h_sent` flags, quiet-hours guarded (no sends before 7am or after 8pm server time — **needs timezone pin**)                                                       |
+  1815→| `review-requests`                                | Every 30 min                  | Built — 2h-after-completion window, 24h lookback cap                                                                                                                                                       |
+  1816→| `daily-brief`                                    | Daily, \~06:00 SAST           | Built — also exposed as an on-demand dashboard API                                                                                                                                                         |
+  1817→| `status-recalculation`                           | Daily                         | **Recommended addition** — closes the Pipeline 10 gap; formalises `active`/`at_risk`/`dormant`/`vip` transitions as a real scheduled job rather than an implied side effect                                |
+  1818→| `recovery-ladder`                                | Daily                         | **Recommended addition** — the single highest-priority pipeline gap (PRD.md §3.2, §7 Pipeline 6): automatic 30/45/60-day escalating win-back, independent of the owner manually running a campaign         |
+  1819→| automation orchestrator (optional consolidation) | —                             | If the number of daily/30-min jobs grows, consider one dispatcher endpoint with a `cadence` parameter purely to reduce the number of separate GitHub Actions workflow files — not a functional requirement |
+  1820→
+  1821→12. WhatsApp Integration
+  1822→
+  1823→Two clients, cleanly separated per the two-credential rule:
+  1824→
+  1825→  - Lifecycle (lib/integrations/evolution/lifecycle.ts): createInstance,
+  1826→    getQrCode, getConnectionState — uses the Global API Key, called only from
+  1827→    tenant-connect flows and Super Admin.
+  1828→  - Send (lib/integrations/evolution/client.ts / modules/whatsapp/send.ts):
+  1829→    sendText — uses the per-tenant instance token, never the Global key.
+  1830→
+  1831→Confirmed correctly separated in the real code — this is the exact discipline
+  1832→the original architecture called for, and it held.
+  1833→
+  1834→Connect flow: Settings → Connect WhatsApp → createInstance (first time) or
+  1835→getQrCode (reconnect) → QR rendered → client polls /api/v1/whatsapp/status
+  1836→every 3 seconds → whatsappConnected flips true once Evolution reports state:
+  1837→"open".
+  1838→
+  1839→Gap: the inbound webhook does not verify EVOLUTION_WEBHOOK_SECRET (or an
+  1840→equivalent signature) before trusting the payload — see PRD.md §3.2, must-fix
+  1841→before launch.
+  1842→
+  1843→13. Payments
+  1844→
+  1845→PayFast, Custom Integration order-preserved MD5 signature (confirmed correct —
+  1846→not the REST API's alphabetical scheme, which would silently fail validation).
+  1847→All four required checks implemented in the IPN handler: signature match, source
+  1848→IP (soft-enforced via a PAYFAST_ENFORCE_IP flag, hard-enforceable once the
+  1849→current PayFast IP ranges are reverified), amount matches a known plan, and a
+  1850→server-to-server validate callback to PayFast. Recurring subscription fields
+  1851→(subscription_type=1, frequency=3 monthly, cycles=0 until cancelled) are set on
+  1852→checkout.
+  1853→
+  1854→Gap: only two plans (starter, growth) are defined; there is no feature-gating
+  1855→between them in code — see PRD.md §11 for the reconciliation decision needed
+  1856→before public pricing.
+  1857→
+  1858→14. Auth & Identity
+  1859→
+  1860→Clerk, no custom auth code. Roles: owner, manager, staff (tenant-scoped),
+  1861→super_admin (platform-level). The claim flow's inline <SignIn>/<SignUp> (via
+  1862→routing="virtual") is a deliberate UX choice — it keeps a prospect on the
+  1863→branded claim page through sign-up rather than bouncing them to a generic auth
+  1864→page, and should be preserved rather than "simplified" to separate pages.
+  1865→
+  1866→15. Security Model
+  1867→
+  1868→Confirmed strengths: consistent tenant scoping in every query reviewed; Zod
+  1869→validation at API boundaries; secrets read inside function bodies (graceful
+  1870→degradation pattern, confirmed repeatedly); Vercel Blob uploads validated by
+  1871→MIME type before storage.
+  1872→
+  1873→Confirmed gaps — must-fix before any public/paid traffic (see PRD.md §3.2 for
+  1874→the full risk framing):
+  1875→
+  1876→1.  Evolution webhook signature/shared-secret verification.
+  1877→2.  Rate limiting on public endpoints (invite-requests, Hub join, geo-claim,
+  1878→    claim page).
+  1879→3.  POPIA-style consent capture at JOIN and a data export/delete path.
+  1880→4.  Transactional or optimistic-locking safety for ordinary point/balance
+  1881→    mutations, not only reward claims.
+  1882→5.  Slug collision handling on tenant creation (two restaurants with the same
+  1883→    name currently produce colliding or unhandled slugs).
+  1884→
+  1885→16. Observability & Reliability
+  1886→
+  1887→/api/v1/selftest is real, built, and non-destructive — it is the concrete deploy
+  1888→gate this project already has, and this plan adopts it as the authoritative
+  1889→design rather than re-specifying an abstract one. Seven checks, each returning
+  1890→pass/warn/fail:
+  1891→
+  1892→1.  config — required env vars present
+  1893→2.  auth — Clerk keys present
+  1894→3.  database — connects and can count tenants
+  1895→4.  whatsapp — Evolution reachable (tolerant of free-tier cold sleep → warn, not
+  1896→    fail)
+  1897→5.  loyalty — earn-calculation sanity check + table read counts
+  1898→6.  campaign — all three presets valid + a real audience/ROI read against an
+  1899→    existing tenant, if any
+  1900→7.  claim — haversine sanity check against a known ~500m pair + table read
+  1901→    counts
+  1902→
+  1903→Secured with SELFTEST_SECRET (falls back to CRON_SECRET). Safe to run repeatedly
+  1904→against production as a go/no-go gate after every deploy or config change.
+  1905→
+  1906→webhook_events captures every raw inbound Evolution and PayFast payload with a
+  1907→processed/error status, viewable in Super Admin — the debugging surface for "why
+  1908→didn't this message/payment do what it should have."
+  1909→
+  1910→17. Testing Strategy
+  1911→
+  1912→Unchanged recommendation from v1 — not yet built in the code reviewed, and worth
+  1913→flagging as a real gap rather than assuming it exists because so much else does:
+  1914→
+  1915→| Layer       | Tool                                     | Covers                                                                                                                            |
+  1916→| ----------- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+  1917→| Unit        | Vitest                                   | Service functions — especially the booking-detail extraction logic, condition/status classification, PayFast signature generation |
+  1918→| Integration | Vitest + test DB                         | Route handlers, webhook signature verification (once built), IPN validation                                                       |
+  1919→| E2E         | Playwright, against the **deployed URL** | Full owner journey, full guest journey (JOIN → book → cancel/reschedule → REDEEM), Restaurant Hub join                            |
+  1920→
+  1921→18. Deployment Topology
+  1922→
+  1923→| Component                    | Where                              | Notes                                                                                                       |
+  1924→| ---------------------------- | ---------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+  1925→| Next.js app                  | Vercel                             | Free tier viable at pilot scale                                                                             |
+  1926→| Database + pgvector          | Neon                               | Free tier; monitor vector index performance as `knowledge_chunks` grows                                     |
+  1927→| Auth                         | Clerk                              | Free to 10k MAU                                                                                             |
+  1928→| WhatsApp — tenant instances  | Evolution API on Render            | One instance per tenant                                                                                     |
+  1929→| WhatsApp — platform instance | Evolution API on Render (separate) | Invites + broadcasts only                                                                                   |
+  1930→| AI                           | OpenAI via Vercel AI SDK           | **Usage-based cost** — the one line item that isn't free-tier-flat; needs per-tenant budgeting before scale |
+  1931→| Payments                     | PayFast                            | Transaction fees only                                                                                       |
+  1932→| File storage                 | Vercel Blob                        | Free tier                                                                                                   |
+  1933→| Cron                         | GitHub Actions                     | Free                                                                                                        |
+  1934→
+  1935→19. Environment Variables Reference
+  1936→
+  1937→| Variable                                                                               | Purpose                                                                      |
+  1938→| -------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+  1939→| `DATABASE_URL`                                                                         | Neon Postgres connection string                                              |
+  1940→| `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` / `CLERK_SECRET_KEY`                               | Clerk                                                                        |
+  1941→| `EVOLUTION_API_URL` / `EVOLUTION_GLOBAL_API_KEY`                                       | Tenant instance lifecycle                                                    |
+  1942→| `EVOLUTION_WEBHOOK_SECRET`                                                             | **Referenced but not yet enforced** — must be checked in the inbound webhook |
+  1943→| `PLATFORM_INSTANCE_NAME` / `PLATFORM_INSTANCE_TOKEN` / `PLATFORM_PHONE`                | Dedicated platform WhatsApp sender for invites/broadcasts                    |
+  1944→| `OPENAI_API_KEY`                                                                       | Concierge completions + embeddings                                           |
+  1945→| `PAYFAST_MERCHANT_ID` / `PAYFAST_MERCHANT_KEY` / `PAYFAST_PASSPHRASE` / `PAYFAST_MODE` | PayFast                                                                      |
+  1946→| `PAYFAST_ENFORCE_IP`                                                                   | `true` to hard-enforce the source-IP check once ranges are reverified        |
+  1947→| `NEXT_PUBLIC_APP_URL`                                                                  | Canonical app URL — claim links, geo-claim links, PayFast return URLs        |
+  1948→| `CRON_SECRET`                                                                          | Shared secret for `/api/cron/*`                                              |
+  1949→| `SELFTEST_SECRET`                                                                      | Falls back to `CRON_SECRET` if unset                                         |
+
+[showing lines 1450-1949 of 1953; use offset=1950 with limit to continue reading]

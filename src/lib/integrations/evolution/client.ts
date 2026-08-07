@@ -145,17 +145,37 @@ export async function sendTextMessage(
 }
 
 // ─── Webhook verification (shared secret or signature) ──────────────────────
+//
+// Per Rule 3 (CLAUDE.md): secrets are read inside the function body that
+// uses them, never at module load. `EVOLUTION_WEBHOOK_SECRET` and the
+// fallback `EVOLUTION_GLOBAL_API_KEY` are therefore resolved on each call.
+//
+// Verification policy:
+//   - If `EVOLUTION_WEBHOOK_SECRET` is unset → dev mode: verification is
+//     disabled and `verifyWebhookSignature` returns `true`. Route handlers
+//     should still call `webhookSecretConfigured()` to decide whether to
+//     enforce (reject on failure) or to process regardless.
+//   - If `EVOLUTION_WEBHOOK_SECRET` is set → the inbound `apikey` header must
+//     match it OR the global API key (the global key is Evolution's default
+//     outbound credential when no per-route secret is configured). A mismatch
+//     is a hard reject — the route handler persists the raw payload for audit
+//     but does not process it.
 
-const WEBHOOK_SECRET = process.env.EVOLUTION_WEBHOOK_SECRET || ''
+export function webhookSecretConfigured(): boolean {
+  return Boolean(process.env.EVOLUTION_WEBHOOK_SECRET)
+}
 
 export function verifyWebhookSignature(
   signature: string | null,
-  body: any,
+  _body: any,
 ): boolean {
-  if (!WEBHOOK_SECRET) return true // not enforced in dev unless secret is set
+  const secret = process.env.EVOLUTION_WEBHOOK_SECRET || ''
+  if (!secret) return true // not enforced in dev unless secret is set
   if (!signature) return false
-  // Evolution can send an apikey header; we compare against the global key.
-  return signature === WEBHOOK_SECRET || signature === GLOBAL_KEY
+  // Evolution sends the shared secret in the `apikey` header. We accept the
+  // configured secret or the global API key as a fallback (Evolution's default
+  // outbound credential when no per-route secret is set).
+  return signature === secret || signature === (process.env.EVOLUTION_GLOBAL_API_KEY || '')
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

@@ -1,51 +1,33 @@
 # Spec-Driven Methodology — How Orderly Gets Built
 
-This explains the loop referenced throughout execution-plan.md, and gives you a template to write a spec for anything added after the MVP phases. The approach is adapted from Jesse Vincent's [obra/superpowers](https://github.com/obra/superpowers) methodology for Claude Code — brainstorm, then spec, then plan, then implement with tests, then verify before calling anything done — reworked here so it's usable in **any** AI coding tool, not just Claude Code.
+Referenced throughout execution-plan.md. Adapted from Jesse Vincent's [obra/superpowers](https://github.com/obra/superpowers) methodology for Claude Code — brainstorm, then spec, then plan, then implement with tests, then verify before calling anything done — reworked so it's usable in **any** AI coding tool, not just Claude Code.
 
-## Why bother with this for a solo-founder project
+## Why this matters more than usual on this project
 
-The instinct on a solo project is to skip straight to "build it." Two failure patterns on this exact project have shown why that doesn't work at this scope:
-
-1. **Scope sprawl** — trying to build all 40+ automations, ten pipelines, and every integration in one pass produces a codebase nobody (including the AI session that wrote it) can hold in their head, and stalls before anything ships.
-2. **Silent drift** — without a written spec to check against, successive AI sessions redefine terms, rename tables, and duplicate components, because each session only has the current conversation as context.
-
-A short spec, written *before* code, is the cheapest tool available to prevent both.
+Orderly's own build history is the argument for this document. Across many separate sessions, a large amount of genuinely good code was produced — a working AI concierge with real grounding, a booking engine that extracts structured details from free text, GPS-gated redemption, campaign attribution — but it accumulated as disconnected snippets rather than one coherent, verified system, and the schema was extended piecemeal enough that no single session had the full picture. A short spec, written *before* code, and a clear "what already exists" check, are the cheapest tools available to prevent both **scope sprawl** and **silent drift** — the two failure patterns this project has already lived through.
 
 ## The five-step loop
 
 ### 1. Spec
-One or two paragraphs, before any code:
-- **Problem** — what user-facing gap does this close?
-- **Goals** — the smallest version that's actually useful
-- **Non-goals** — explicitly what this does *not* include (this is usually more valuable than the goals list)
-- **Acceptance criteria** — how you'll know it's done, stated as observable behaviour, not "code exists"
+Before any code: **Problem** (what gap does this close?), **Goals** (the smallest useful version), **Non-goals** (often more valuable than the goals list), **Acceptance criteria** (observable behaviour, not "code exists").
 
 ### 2. Plan
-Turn the spec into an ordered file list: what gets created, what gets edited (never duplicated — see execution-plan.md Golden Rule 3), and in what order, respecting module boundaries from plan.md §5.
+Turn the spec into an ordered file list — what's created, what's edited (never duplicated), respecting the module boundaries in plan.md §5. **On this project specifically: check `execution-plan.md` §2 (current build status) first** — a surprising number of "new features" turn out to be partially built already.
 
 ### 3. Implement with tests
-Where a unit or integration test is practical (service-layer logic, signature validation, condition evaluators), write the failing test first, then the minimal code to pass it — RED, then GREEN. Where a full automated test isn't practical for a given piece (a UI flow, a live WhatsApp round-trip), the plan's "definition of done" manual check plays that role instead — but it must still be written down and actually performed, not assumed.
+Where a unit/integration test is practical, write the failing test first. Where it isn't (a live WhatsApp round-trip, a real PayFast sandbox transaction), the plan's manual "definition of done" check plays that role — but it must still be written down and actually performed.
 
 ### 4. Verify
-- Build passes with zero env vars set (nullable-client resilience)
-- Build passes with real credentials
-- The specific acceptance criteria from step 1 are checked, ideally against a deployed URL, not just localhost
-- No existing file was duplicated instead of edited
+Build passes with zero env vars and with real credentials; the acceptance criteria are checked against a **deployed URL**; `/api/v1/selftest` still returns healthy; no existing file was duplicated instead of edited.
 
 ### 5. Commit
-Specific files, a clear `feat(scope): description` message, pushed — not left sitting only in a local or sandboxed session.
+Specific files, a clear `feat(scope): description` message, pushed.
 
 ## Using this without Claude Code / Superpowers
 
-If you're building in chat.z.ai (GLM) or plain VS Code Copilot, you don't get the `/brainstorm`, `/write-plan`, `/execute-plan` slash commands or auto-triggering skills that Superpowers provides in Claude Code. You get the same *outcome* by doing it manually:
+In chat.z.ai or plain VS Code Copilot, replicate the outcome manually: paste the spec as the first message of a fresh session, ask the tool to restate its file-level plan before writing code, and walk the Definition of Done checklist yourself afterward — don't take "done" as verified. In Claude Code, the Superpowers plugin (`/plugin marketplace add obra/superpowers-marketplace` then `/plugin install superpowers@superpowers-marketplace`) gives you this loop with automatic skill-triggering and can largely execute this plan directly, using this document and execution-plan.md as its spec/plan inputs.
 
-- Paste the phase's spec (already written for you in execution-plan.md for MVP phases) as the first message of a fresh session.
-- Ask the tool to restate its plan (the file list) before writing code, and read it before approving.
-- After it reports "done," don't take that as verified — walk through the Definition of Done checklist yourself.
-
-If you *are* using Claude Code, installing the Superpowers plugin (`/plugin marketplace add obra/superpowers-marketplace` then `/plugin install superpowers@superpowers-marketplace`) gives you this loop with automatic skill-triggering (test-driven-development, systematic-debugging, verification-before-completion) and can largely execute this plan directly — treat this document and execution-plan.md as the spec/plan inputs it needs.
-
-## Template for a new spec (anything beyond the MVP phases)
+## Template for a new spec
 
 ```markdown
 # Spec NNN — <short title>
@@ -53,21 +35,24 @@ If you *are* using Claude Code, installing the Superpowers plugin (`/plugin mark
 ## Problem
 <what user-facing gap does this close?>
 
+## Already exists
+<check execution-plan.md §2 — what related capability is already built,
+and what does this spec add on top of it?>
+
 ## Goals
 <the smallest useful version>
 
 ## Non-goals
-<explicitly excluded — often the most important section>
+<explicitly excluded>
 
 ## Design
-<how it fits the existing modules/messaging/automation architecture from plan.md
-— does it need a new module, or does it extend an existing one?>
+<which module does this belong to (plan.md §5)? new module, or extending one?>
 
 ## Acceptance criteria
-<observable behaviour, not "code written">
+<observable behaviour>
 
 ## Open questions
-<anything genuinely undecided — don't guess, flag it>
+<anything genuinely undecided>
 ```
 
-See `specs/001-core-loyalty-messaging.md` for a fully worked example applying this template to the messaging engine and loyalty core (execution-plan.md Phases 2–3).
+See `specs/001-pipeline-4-loyalty-core.md` for a worked example of a largely-built pipeline, and `specs/002-ai-concierge-and-booking-engine.md` for a worked example of the most architecturally complex subsystem in the product.

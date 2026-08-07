@@ -1,8 +1,21 @@
 // /api/webhooks/evolution — public, verified, persists raw event first, dispatches the full router
+//
+// Security contract (CLAUDE.md Rule 5):
+//   1. Persist the raw payload for audit BEFORE any processing, regardless of
+//      whether the signature verifies. The `webhook_events` row is the audit
+//      trail — a verification failure must still leave a record.
+//   2. If `EVOLUTION_WEBHOOK_SECRET` is set and the inbound `apikey` header
+//      does not match (the secret OR the global API key fallback), log the
+//      failure, mark the persisted row `verified=false`, and return 200 WITHOUT
+//      dispatching the router. Returning 200 (not 401/403) prevents an attacker
+//      from distinguishing a rejected payload from an accepted one — a hard
+//      rejection would tell them the URL is real and the secret is wrong.
+//   3. If `EVOLUTION_WEBHOOK_SECRET` is NOT set (dev mode), process normally.
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import {
   verifyWebhookSignature,
+  webhookSecretConfigured,
   extractPhoneFromWebhook,
   extractTextFromWebhook,
   extractInstanceNameFromWebhook,
@@ -20,6 +33,7 @@ export async function POST(req: NextRequest) {
   }
 
   const signature = req.headers.get('apikey') ?? req.headers.get('x-apikey') ?? null
+  const enforced = webhookSecretConfigured()
   const verified = verifyWebhookSignature(signature, payload)
   const source = 'evolution'
 
@@ -32,7 +46,7 @@ export async function POST(req: NextRequest) {
     if (t) tenantId = t.id
   }
 
-  // Persist raw event FIRST
+  // Persist raw event FIRST — always, for audit, even if verification fails.
   let webhookEventId: string | null = null
   if (db) {
     try {
@@ -49,6 +63,20 @@ export async function POST(req: NextRequest) {
     } catch (e) {
       console.error('[webhooks/evolution] persist failed:', e)
     }
+  }
+
+  // Enforce signature verification. If the secret is configured and the
+  // signature does not match, do NOT dispatch the router. We return 200 so
+  // an attacker cannot distinguish a rejected payload from an accepted one.
+  if (enforced && !verified) {
+    console.warn('[webhooks/evolution] verification failed — payload persisted but not processed', {
+      webhookEventId,
+      tenantId,
+      instanceName,
+      eventType,
+      hasSignature: Boolean(signature),
+    })
+    return NextResponse.json({ ok: true })
   }
 
   const phone = extractPhoneFromWebhook(payload)

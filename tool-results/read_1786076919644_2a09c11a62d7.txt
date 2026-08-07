@@ -1,0 +1,502 @@
+     1→  1000→  1000→    mechanism.
+     2→  1001→  1001→  - Grounded failure mode: any AI error falls back to a hardcoded keyword menu
+     3→  1002→  1002→    rather than leaving the guest unanswered.
+     4→  1003→  1003→
+     5→  1004→  1004→Goals (what remains)
+     6→  1005→  1005→
+     7→  1006→  1006→  - Verify the whole chain end-to-end against production (execution-plan.md
+     8→  1007→  1007→    Track A4) — this is the least-tested subsystem given its complexity.
+     9→  1008→  1008→  - Wrap the direct openai(...) call sites behind a thin lib/ai/provider.ts
+    10→  1009→  1009→    indirection (plan.md §3) so a future model or provider swap doesn't touch
+    11→  1010→  1010→    every call site.
+    12→  1011→  1011→  - Add a per-tenant token/usage budget before broad concierge usage — currently
+    13→  1012→  1012→    unbounded (PRD.md §3.2 economics risk).
+    14→  1013→  1013→  - Decide and implement the timezone pin for "today" resolution in date
+    15→  1014→  1014→    extraction — a booking for "Friday" resolved against server time instead of
+    16→  1015→  1015→    Africa/Johannesburg can silently pick the wrong date near a day boundary.
+    17→  1016→  1016→
+    18→  1017→  1017→Non-goals
+    19→  1018→  1018→
+    20→  1019→  1019→  - Multi-turn conversation memory beyond the single booking draft — each
+    21→  1020→  1020→    concierge question is still answered standalone; a full conversation history
+    22→  1021→  1021→    is future scope, not this spec.
+    23→  1022→  1022→  - Table/seating-map-aware availability — checkAvailability is best-effort and
+    24→  1023→  1023→    fail-open today (PRD.md §3.2); a real capacity model is separate, larger
+    25→  1024→  1024→    work.
+    26→  1025→  1025→  - Voice or any non-text channel.
+    27→  1026→  1026→
+    28→  1027→  1027→Design
+    29→  1028→  1028→
+    30→  1029→  1029→No new modules — this spec is entirely verification, hardening, and two small
+    31→  1030→  1030→additions (lib/ai/provider.ts, a usage-budget check) inside the existing
+    32→  1031→  1031→modules/concierge/, modules/knowledge/, and modules/bookings/ boundaries.
+    33→  1032→  1032→
+    34→  1033→  1033→Acceptance criteria
+    35→  1034→  1034→
+    36→  1035→  1035→  - Asking a question answerable only by a tool (menu, hours) returns a correct,
+    37→  1036→  1036→    current answer even after the underlying data changes (edit a menu item's
+    38→  1037→  1037→    price, ask again, confirm the new price is used — proves it's a live tool
+    39→  1038→  1038→    call, not a cached/stale RAG chunk).
+    40→  1039→  1039→  - Asking a question answerable only by uploaded knowledge (a policy from an
+    41→  1040→  1040→    uploaded PDF) returns a grounded answer with visible source snippets; asking
+    42→  1041→  1041→    something in neither returns a graceful "not sure, please call" rather than
+    43→  1042→  1042→    an invented answer.
+    44→  1043→  1043→  - Booking "table for 4 Friday 7pm" in one message completes in one round trip;
+    45→  1044→  1044→    booking with the same details spread across three messages completes
+    46→  1045→  1045→    identically.
+    47→  1046→  1046→  - A booking attempted for a date that's already passed is rejected and
+    48→  1047→  1047→    re-asked, not silently booked.
+    49→  1048→  1048→  - Killing the OpenAI connection (or an invalid key) causes the router to fall
+    50→  1049→  1049→    back to the keyword menu, never an unhandled exception visible to the guest.
+    51→  1050→  1050→
+    52→  1051→  1051→Open questions
+    53→  1052→  1052→
+    54→  1053→  1053→  - Usage-budget mechanism: hard cutoff per tenant per month, or a soft warning
+    55→  1054→  1054→    to the owner? (Recommend soft warning first — hard cutoffs risk stranding a
+    56→  1055→  1055→    guest mid-conversation.)
+    57→  1056→  1056→  - Whether checkAvailability's fail-open behaviour should flip to fail-closed
+    58→  1057→  1057→    once real booking volume exists — tracked as a decision point in plan.md
+    59→  1058→  1058→    §3.2, not resolved here.
+    60→  1059→  1059→
+    61→  1060→  1060→execution-plan.md
+    62→  1061→  1061→
+    63→  1062→  1062→Orderly — Execution Plan
+    64→  1063→  1063→
+    65→  1064→  1064→Version: 2.0 — reflects a large amount of code already written; restructured
+    66→  1065→  1065→from "build from zero" phases into tracks that start with assembly and
+    67→  1066→  1066→verification Depends on: PRD.md (what to build), plan.md (how it's architected)
+    68→  1067→  1067→
+    69→  1068→  1068→1. How to Use This Document
+    70→  1069→  1069→
+    71→  1070→  1070→Unlike a greenfield plan, this one starts from an honest premise: most of the
+    72→  1071→  1071→core product has already been written, across many separate sessions, as code
+    73→  1072→  1072→snippets — not yet as one coherent, deployed repository. The highest-leverage
+    74→  1073→  1073→next step is not "Phase 1: scaffold," it's assembling and verifying what exists,
+    75→  1074→  1074→then closing a short, prioritised list of real gaps.
+    76→  1075→  1075→
+    77→  1076→  1076→Work tool-agnostically as before (chat.z.ai, VS Code + Copilot, Claude Code —
+    78→  1077→  1077→optionally with obra/superpowers, whose spec→plan→implement→verify loop this
+    79→  1078→  1078→document still follows). The hard rule from v1 stands: build in a persistent,
+    80→  1079→  1079→git-backed environment and commit after every green step — the project's history
+    81→  1080→  1080→includes real, repeated work loss from ephemeral sandboxes.
+    82→  1081→  1081→
+    83→  1082→  1082→2. Current Build Status Snapshot
+    84→  1083→  1083→
+    85→  1084→  1084→Mirrors PRD.md §7 — the single source of truth for what to verify (Track A)
+    86→  1085→  1085→versus what to build (Track C). Re-check this table honestly before starting any
+    87→  1086→  1086→new work; it will drift as the codebase changes.
+    88→  1087→  1087→
+    89→  1088→  1088→| Pipeline                                                                       | Status       | Headline gap                                                                   |
+    90→  1089→  1089→| ------------------------------------------------------------------------------ | ------------ | ------------------------------------------------------------------------------ |
+    91→  1090→  1090→| 1 · Acquire                                                                    | Partial      | Catering/event lead capture not distinct from general booking                  |
+    92→  1091→  1091→| 2 · Convert                                                                    | Mostly built | Abandoned-booking recovery message not sent                                    |
+    93→  1092→  1092→| 3 · Delight                                                                    | Roadmap      | Nothing automated yet — VIP recognition, birthdays, anniversaries, upsells     |
+    94→  1093→  1093→| 4 · Loyalty                                                                    | Built        | Proactive reactivation/redeem-reminder not automated                           |
+    95→  1094→  1094→| 5 · Market                                                                     | Built        | Behaviour-triggered micro-campaigns not built                                  |
+    96→  1095→  1095→| 6 · Recover                                                                    | Partial      | **No automatic escalation cron — the biggest gap in the whole system**         |
+    97→  1096→  1096→| 7 · Optimise                                                                   | Roadmap      | Entirely deferred, appropriately                                               |
+    98→  1097→  1097→| 8 · Operations                                                                 | Partial      | Only the daily brief exists                                                    |
+    99→  1098→  1098→| 9 · Reviews                                                                    | Built        | No digest/summary rollup                                                       |
+   100→  1099→  1099→| 10 · Intelligence                                                              | Partial      | Weekly insight needs a data refresh; no automatic status-recalc cron confirmed |
+   101→  1100→  1100→| Cross-cutting: Super Admin, Concierge+RAG, WhatsApp Connect, Billing, Selftest | Built        | Security/reliability hardening needed (Track B)                                |
+   102→  1101→  1101→
+   103→  1102→  1102→3. The Spec-Driven Loop
+   104→  1103→  1103→
+   105→  1104→  1104→Unchanged from v1: spec → plan → implement with tests → verify → commit. Full
+   106→  1105→  1105→methodology and two worked examples (Loyalty Core, and the more complex AI
+   107→  1106→  1106→Concierge & Booking Engine) live in specs/. For every gap closed in Track C
+   108→  1107→  1107→below, write the short spec first using the template in
+   109→  1108→  1108→specs/00-spec-driven-methodology.md — even a paragraph, before code.
+   110→  1109→  1109→
+   111→  1110→  1110→4. Golden Rules
+   112→  1111→  1111→
+   113→  1112→  1112→1.  Persistence over convenience. Push to GitHub after every step, not at the
+   114→  1113→  1113→    end.
+   115→  1114→  1114→2.  One session per step. Don't chain multiple tracks into one session.
+   116→  1115→  1115→3.  One file, one owner. Search before creating; edit, don't duplicate.
+   117→  1116→  1116→4.  Build green is the floor, not the finish line. Every step's definition of
+   118→  1117→  1117→    done includes a real behavioural check.
+   119→  1118→  1118→5.  Verify against the deployed URL once one exists.
+   120→  1119→  1119→6.  Verify what's already written before writing more. Specific to this
+   121→  1120→  1120→    project's situation: a large amount of correct code exists that has never
+   122→  1121→  1121→    been run together as one application. Track A exists because assuming it
+   123→  1122→  1122→    works is the single biggest risk right now — bigger than any remaining
+   124→  1123→  1123→    feature gap.
+   125→  1124→  1124→7.  No new automation without closing the loop end-to-end. A feature "built" in
+   126→  1125→  1125→    a chat session that was never wired into the router, never migrated into the
+   127→  1126→  1126→    schema, or never deployed is not built — it's a draft.
+   128→  1127→  1127→
+   129→  1128→  1128→5. Definition of Done (template, applies everywhere below)
+   130→  1129→  1129→
+   131→  1130→  1130→- [ ] npm run build passes with zero environment variables set
+   132→  1131→  1131→- [ ] npm run build passes with real credentials in .env.local
+   133→  1132→  1132→- [ ] The step's specific behavioural check (listed per step) passes against the
+   134→  1133→  1133→  deployed URL, not just localhost, once a deployment exists
+   135→  1134→  1134→- [ ] /api/v1/selftest returns healthy: true (or an explained, accepted warn)
+   136→  1135→  1135→- [ ] Relevant tests pass, where tests exist for that area
+   137→  1136→  1136→- [ ] Changes committed and pushed
+   138→  1137→  1137→- [ ] No file duplicated instead of edited
+   139→  1138→  1138→
+   140→  1139→  1139→6. TRACK A — Assemble, Deploy, and Verify What's Built
+   141→  1140→  1140→
+   142→  1141→  1141→This is the real Phase 1. Nothing else matters until this track is green.
+   143→  1142→  1142→
+   144→  1143→  1143→A0 — Gather accounts & keys
+   145→  1144→  1144→
+   146→  1145→  1145→Same as before, expanded per plan.md §19: Neon (DATABASE_URL), Clerk (test
+   147→  1146→  1146→keys), GitHub, Vercel, Render ×2 (tenant Evolution + platform Evolution), OpenAI
+   148→  1147→  1147→(OPENAI_API_KEY), PayFast sandbox. Generate CRON_SECRET, SELFTEST_SECRET,
+   149→  1148→  1148→EVOLUTION_WEBHOOK_SECRET (random strings — the last one currently unused by the
+   150→  1149→  1149→code, see Track B). Never paste a live secret key into a chat interface's
+   151→  1150→  1150→message box — only into .env.local and your deployment platform's environment
+   152→  1151→  1151→settings.
+   153→  1152→  1152→
+   154→  1153→  1153→A1 — Consolidate one coherent schema
+   155→  1154→  1154→
+   156→  1155→  1155→The schema was extended piecemeal across many separate messages — tenants alone
+   157→  1156→  1156→gained columns in at least four different passes (Smart Page config, WhatsApp
+   158→  1157→  1157→fields, capacity/avg-spend/hours, PayFast token), and several tables (campaigns,
+   159→  1158→  1158→reservations, guests) each picked up columns in more than one pass. Before
+   160→  1159→  1159→anything else, produce one final schema.ts containing every table and column
+   161→  1160→  1160→referenced anywhere in the codebase — cross-check each service file's Drizzle
+   162→  1161→  1161→imports against the schema to catch anything missed. Definition of done: npx
+   163→  1162→  1162→drizzle-kit push against a real Neon database succeeds with zero errors and
+   164→  1163→  1163→every table referenced by any service file exists.
+   165→  1164→  1164→
+   166→  1165→  1165→A2 — Assemble the repository
+   167→  1166→  1166→
+   168→  1167→  1167→Every route handler, service module, and component pasted across the build
+   169→  1168→  1168→sessions needs to land in the file locations specified in file-structure.md.
+   170→  1169→  1169→Cross-check imports — several modules import from each other (modules/bookings →
+   171→  1170→  1170→modules/reservations; modules/rewards → modules/campaigns; modules/waitlist →
+   172→  1171→  1171→modules/reservations) and a missing or misplaced file will surface as a build
+   173→  1172→  1172→error, which is the fastest way to catch an assembly mistake. Definition of
+   174→  1173→  1173→done: npm run build passes with zero env vars set (the nullable-client pattern
+   175→  1174→  1174→must hold even now, at full scope).
+   176→  1175→  1175→
+   177→  1176→  1176→A3 — Deploy and run selftest
+   178→  1177→  1177→
+   179→  1178→  1178→Push to GitHub, deploy to Vercel with the full environment variable set from
+   180→  1179→  1179→plan.md §19, then:
+   181→  1180→  1180→
+   182→  1181→  1181→curl -s https://<your-app>.vercel.app/api/v1/selftest -H "Authorization: Bearer $SELFTEST_SECRET" | jq
+   183→  1182→  1182→
+   184→  1183→  1183→Definition of done: healthy: true, or every warn is one you understand and
+   185→  1184→  1184→accept (e.g. Evolution cold-start on the free Render tier).
+   186→  1185→  1185→
+   187→  1186→  1186→A4 — Manual smoke test, pipeline by pipeline
+   188→  1187→  1187→
+   189→  1188→  1188→Walk every Built row from §2 as a real human, on a real phone, against
+   190→  1189→  1189→production:
+   191→  1190→  1190→
+   192→  1191→  1191→  - Loyalty: JOIN → BALANCE → REDEEM (inside and outside the GPS radius) → STOP
+   193→  1192→  1192→    → JOIN again (reactivation)
+   194→  1193→  1193→  - Booking: free-text booking in one message, then a second booking dribbled
+   195→  1194→  1194→    across three messages; CANCEL; RESCHEDULE; wait for/trigger a reminder;
+   196→  1195→  1195→    CONFIRM
+   197→  1196→  1196→  - Waitlist: WAITLIST, then cancel an unrelated booking, confirm the offer
+   198→  1197→  1197→    arrives and YES books it
+   199→  1198→  1198→  - Reviews: mark a reservation completed with a backdated completed_at, run the
+   200→  1199→  1199→    review-requests cron, reply with a rating and with free text, confirm
+   201→  1200→  1200→    routing
+   202→  1201→  1201→  - Campaigns: seed guests across statuses, run all three presets, confirm live
+   203→  1202→  1202→    audience/ROI, send, confirm a subsequent REDEEM attributes back to the
+   204→  1203→  1203→    campaign
+   205→  1204→  1204→  - Concierge: paste a real website, upload a real menu PDF, ask a question
+   206→  1205→  1205→    answerable only from each, confirm grounded answers with visible sources;
+   207→  1206→  1206→    ask something not covered and confirm it declines rather than guesses
+   208→  1207→  1207→  - Super Admin: CSV upload, send an invite, complete the claim flow end-to-end,
+   209→  1208→  1208→    check the webhook log shows every step
+   210→  1209→  1209→  - Billing: a full PayFast sandbox transaction, confirm the IPN (not the
+   211→  1210→  1210→    browser redirect) flips the tenant to active
+   212→  1211→  1211→
+   213→  1212→  1212→Definition of done: every one of the above actually happened on the live site,
+   214→  1213→  1213→with proof (a screenshot or a database row) — not "should work."
+   215→  1214→  1214→
+   216→  1215→  1215→7. TRACK B — Security & Reliability Hardening
+   217→  1216→  1216→
+   218→  1217→  1217→Do this before any real, non-test guest or restaurant touches the system. Each
+   219→  1218→  1218→item maps to a gap identified in plan.md §15 / PRD.md §3.2.
+   220→  1219→  1219→
+   221→  1220→  1220→| Item                                                                                                                                    | Why it's before, not after, launch                                  |
+   222→  1221→  1221→| --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+   223→  1222→  1222→| Evolution webhook signature/shared-secret verification                                                                                  | Currently anyone who finds the URL can inject fake inbound messages |
+   224→  1223→  1223→| Rate limiting on public endpoints (invite-requests, Hub join, geo-claim, claim page)                                                    | Currently open to spam/abuse                                        |
+   225→  1224→  1224→| Pin `Africa/Johannesburg` everywhere date/time math happens (reminders, quiet-hours guard, daily brief "today," review-request windows) | Currently uses server time; will misfire                            |
+   226→  1225→  1225→| POPIA consent capture at JOIN + data export/delete path                                                                                 | Legal exposure, not just polish                                     |
+   227→  1226→  1226→| Slug collision handling on tenant creation                                                                                              | Two same-named restaurants currently collide                        |
+   228→  1227→  1227→| Swap the hand-rolled CSV parser for `papaparse`                                                                                         | Robustness on messy real-world prospect lists                       |
+   229→  1228→  1228→| Review transactional/optimistic-locking safety for point mutations beyond reward claims                                                 | Race risk under concurrent load                                     |
+   230→  1229→  1229→| Add rate limiting + retry/backoff to the messaging gateway                                                                              | Protects tenant WhatsApp sessions from bulk-send bans               |
+   231→  1230→  1230→
+   232→  1231→  1231→Definition of done: every row above is either fixed or is an explicit, written,
+   233→  1232→  1232→accepted risk — not silently skipped.
+   234→  1233→  1233→
+   235→  1234→  1234→8. TRACK C — Close the Pipeline Gaps
+   236→  1235→  1235→
+   237→  1236→  1236→Ordered by impact-to-effort, per PRD.md §15. Each is its own spec (write it
+   238→  1237→  1237→first) and its own small phase.
+   239→  1238→  1238→
+   240→  1239→  1239→C1 · Automatic recovery ladder (Pipeline 6 — highest priority). A daily cron
+   241→  1240→  1240→that finds guests crossing 30/45/60-day inactivity thresholds and sends an
+   242→  1241→  1241→escalating win-back sequence, independent of the owner tapping "Bring Back Lost
+   243→  1242→  1242→Faces." Closes the single biggest gap between vision and reality.
+   244→  1243→  1243→
+   245→  1244→  1244→C2 · Status recalculation cron (Pipeline 10). Formalise
+   246→  1245→  1245→active/at_risk/dormant/vip transitions as a real, daily, testable scheduled job
+   247→  1246→  1246→— currently an implied side effect, not confirmed as its own cron. C1 depends on
+   248→  1247→  1247→this being reliable.
+   249→  1248→  1248→
+   250→  1249→  1249→C3 · Delight automations (Pipeline 3). High emotional ROI, individually small
+   251→  1250→  1250→builds: VIP recognition on contact (notify manager, surface preferred
+   252→  1251→  1251→table/wine/waiter), birthday automation (uses data the daily brief already
+   253→  1252→  1252→reads), anniversary automation, first-visit recognition.
+   254→  1253→  1253→
+   255→  1254→  1254→C4 · Weekly Insights refresh + Monday Revenue Brief (Pipeline 10). Update the
+   256→  1255→  1255→existing weekly-insight generator to pull from reservations, reviews, and
+   257→  1256→  1256→campaign attribution — not only loyalty numbers, which is all it currently sees.
+   258→  1257→  1257→Add a distinct weekly revenue-focused brief alongside the existing daily one.
+   259→  1258→  1258→
+   260→  1259→  1259→C5 · Public menu page (/r/[slug]/menu). Small, visible gap — render menuItems on
+   261→  1260→  1260→a real page instead of "View Menu" just prompting a WhatsApp question. The data
+   262→  1261→  1261→and the AI tool already exist; this is a rendering task.
+   263→  1262→  1262→
+   264→  1263→  1263→C6 · Referral rewards (Pipeline 1).
+   265→  1264→  1264→
+   266→  1265→  1265→C7 · Catering & event/function lead capture (Pipeline 1) as flows distinct from
+   267→  1266→  1266→the general booking engine — structured collection of guest count, budget,
+   268→  1267→  1267→location, date; follow-up cadence.
+   269→  1268→  1268→
+   270→  1269→  1269→C8 · Operations pipeline beyond the daily brief (Pipeline 8) — opening
+   271→  1270→  1270→checklists, low-stock/supplier reorder. Internal-facing, lower priority than
+   272→  1271→  1271→anything guest-facing above.
+   273→  1272→  1272→
+   274→  1273→  1273→C9 · Optimise pipeline (Pipeline 7) — AI-targeted campaigns,
+   275→  1274→  1274→weather/payday/occasion triggers, sudden-empty-table flash fills. Deliberately
+   276→  1275→  1275→last: this pipeline is most valuable once there's real usage data to target
+   277→  1276→  1276→against, which only exists after Tracks A–C8 are live with real tenants.
+   278→  1277→  1277→
+   279→  1278→  1278→9. TRACK D — Pricing, Testing, and Launch Prep
+   280→  1279→  1279→
+   281→  1280→  1280→  - Pricing reconciliation (PRD.md §11, §15): decide between implementing real
+   282→  1281→  1281→    tier/pipeline gating for a four-tier ladder, or simplifying public pricing
+   283→  1282→  1282→    to the two plans actually enforced. This is a business decision, not a build
+   284→  1283→  1283→    task, but it blocks any public pricing page.
+   285→  1284→  1284→  - Automated test suite (plan.md §17): Vitest unit/integration for the
+   286→  1285→  1285→    highest-risk logic (booking extraction, signature generation, status
+   287→  1286→  1286→    classification), Playwright E2E against the deployed URL for both the owner
+   288→  1287→  1287→    and guest journeys.
+   289→  1288→  1288→  - Orderly name/trademark check before paid marketing spend.
+   290→  1289→  1289→  - First real business dress rehearsal: one real prospect, real claim, real
+   291→  1290→  1290→    WhatsApp connection, real guest interactions, real PayFast sandbox — then,
+   292→  1291→  1291→    only after that's clean, flip PayFast to production for the first paying
+   293→  1292→  1292→    tenant.
+   294→  1293→  1293→
+   295→  1294→  1294→10. Deferred Beyond This Plan
+   296→  1295→  1295→
+   297→  1296→  1296→Multi-location support per tenant, native ordering/payment inside the Hub, any
+   298→  1297→  1297→channel beyond WhatsApp, migration to the official WhatsApp Business Platform
+   299→  1298→  1298→(Cloud API) — tracked as roadmap, not scheduled.
+   300→  1299→  1299→
+   301→  1300→  1300→11. Verification Gate Checklist (reusable, every track/step)
+   302→  1301→  1301→
+   303→  1302→  1302→- [ ] Definition of Done fully checked, not partially
+   304→  1303→  1303→- [ ] Code pushed to GitHub
+   305→  1304→  1304→- [ ] The deployed URL reflects the latest change, not just localhost
+   306→  1305→  1305→- [ ] /api/v1/selftest still returns healthy (or an accepted warn) after the
+   307→  1306→  1306→  change
+   308→  1307→  1307→- [ ] Nothing from an earlier track was duplicated instead of extended
+   309→  1308→  1308→
+   310→  1309→  1309→file-structure.md
+   311→  1310→  1310→
+   312→  1311→  1311→Orderly — Production File Structure
+   313→  1312→  1312→
+   314→  1313→  1313→Version: 2.0 — reflects the module layout of the system as actually built
+   315→  1314→  1314→(plan.md §5), not the narrower loyalty-only layout from v1.
+   316→  1315→  1315→
+   317→  1316→  1316→Status markers show what's confirmed built (✅), partially built (◐), or roadmap
+   318→  1317→  1317→(○) per PRD.md §7 / execution-plan.md §2 — so this doubles as a map of what to
+   319→  1318→  1318→verify (Track A) versus what to create (Track C).
+   320→  1319→  1319→
+   321→  1320→  1320→orderly/
+   322→  1321→  1321→│
+   323→  1322→  1322→├── PRD.md · plan.md · execution-plan.md · file-structure.md · README.md
+   324→  1323→  1323→├── specs/
+   325→  1324→  1324→│   ├── 00-spec-driven-methodology.md
+   326→  1325→  1325→│   ├── 001-pipeline-4-loyalty-core.md
+   327→  1326→  1326→│   └── 002-ai-concierge-and-booking-engine.md
+   328→  1327→  1327→│
+   329→  1328→  1328→├── drizzle/                          # drizzle-kit push output
+   330→  1329→  1329→├── drizzle.config.ts
+   331→  1330→  1330→│
+   332→  1331→  1331→├── .github/workflows/
+   333→  1332→  1332→│   ├── ci.yml                         # typecheck + build (no env vars) + lint
+   334→  1333→  1333→│   ├── reservation-reminders.yml      # ✅ every 30 min
+   335→  1334→  1334→│   ├── review-requests.yml            # ✅ every 30 min
+   336→  1335→  1335→│   ├── daily-brief.yml                # ✅ daily
+   337→  1336→  1336→│   ├── status-recalc.yml              # ○ RECOMMENDED (Track C2)
+   338→  1337→  1337→│   ├── recovery-ladder.yml            # ○ RECOMMENDED (Track C1)
+   339→  1338→  1338→│   └── evolution-keep-warm.yml        # keeps both Evolution instances awake
+   340→  1339→  1339→│
+   341→  1340→  1340→├── tests/                             # ○ ROADMAP — plan.md §17
+   342→  1341→  1341→│   ├── unit/  integration/  e2e/
+   343→  1342→  1342→│
+   344→  1343→  1343→├── package.json · tsconfig.json · next.config.ts · tailwind.config.ts
+   345→  1344→  1344→├── .env.example · .gitignore
+   346→  1345→  1345→│
+   347→  1346→  1346→└── src/
+   348→  1347→  1347→    │
+   349→  1348→  1348→    ├── middleware.ts                  # Clerk auth gate; public routes listed explicitly
+   350→  1349→  1349→    │
+   351→  1350→  1350→    ├── app/
+   352→  1351→  1351→    │   ├── (marketing)/page.tsx        # ✅ landing page
+   353→  1352→  1352→    │   │
+   354→  1353→  1353→    │   ├── dashboard/page.tsx          # ✅ today's brief, quick actions, highlights
+   355→  1354→  1354→    │   ├── campaigns/page.tsx          # ✅ history + 3-preset builder
+   356→  1355→  1355→    │   ├── setup/page.tsx              # ✅ capacity, avg spend, hours, rewards catalogue
+   357→  1356→  1356→    │   ├── menu/page.tsx               # ✅ menu manager (owner-facing CRUD)
+   358→  1357→  1357→    │   ├── billing/page.tsx            # ✅ plan cards, PayFast checkout
+   359→  1358→  1358→    │   ├── settings/page.tsx           # ✅ tabs: profile, WhatsApp connect, concierge, quick answers
+   360→  1359→  1359→    │   ├── reservations/page.tsx       # ◐ dedicated list/management UI beyond dashboard highlights
+   361→  1360→  1360→    │   ├── reviews/page.tsx            # ○ reviews inbox UI
+   362→  1361→  1361→    │   ├── operations/page.tsx         # ○ checklists/inventory UI
+   363→  1362→  1362→    │   ├── login/[[...rest]]/page.tsx  # direct dashboard access for returning users
+   364→  1363→  1363→    │   ├── signup/[[...rest]]/page.tsx
+   365→  1364→  1364→    │   │
+   366→  1365→  1365→    │   ├── admin/                      # ✅ Super Admin, all routes below
+   367→  1366→  1366→    │   │   ├── layout.tsx              #   requireSuperAdmin() guard
+   368→  1367→  1367→    │   │   ├── page.tsx                #   overview counts
+   369→  1368→  1368→    │   │   ├── tenants/page.tsx
+   370→  1369→  1369→    │   │   ├── prospects/page.tsx      #   CSV upload + per-row Invite button
+   371→  1370→  1370→    │   │   ├── broadcast/page.tsx
+   372→  1371→  1371→    │   │   └── webhooks/page.tsx       #   raw payload viewer, filter by source
+   373→  1372→  1372→    │   │
+   374→  1373→  1373→    │   ├── claim/[token]/
+   375→  1374→  1374→    │   │   ├── page.tsx                # ✅ branded, embeds Clerk SignIn/SignUp inline (routing="virtual")
+   376→  1375→  1375→    │   │   └── actions.ts              #   claimProspectAction — prospect → tenant + owner profile
+   377→  1376→  1376→    │   ├── geo-claim/[token]/page.tsx  # ✅ GPS-verified reward claim, cashier QR + code
+   378→  1377→  1377→    │   ├── r/[slug]/
+   379→  1378→  1378→    │   │   ├── page.tsx                # ✅ Restaurant Hub — action grid, web-based Join Rewards
+   380→  1379→  1379→    │   │   └── menu/page.tsx           # ○ GAP (Track C5) — render menuItems; concierge tool already reads this data
+   381→  1380→  1380→    │   │
+   382→  1381→  1381→    │   └── api/
+   383→  1382→  1382→    │       ├── v1/
+   384→  1383→  1383→    │       │   ├── selftest/route.ts             # ✅ 7-check non-destructive deploy gate
+   385→  1384→  1384→    │       │   ├── invite-requests/route.ts       # ✅ public — homepage "request an invite" → prospects
+   386→  1385→  1385→    │       │   ├── hub/join/route.ts               # ✅ public — Restaurant Hub web-join
+   387→  1386→  1386→    │       │   ├── geo-claim/[token]/claim/route.ts # ✅ public — GPS claim
+   388→  1387→  1387→    │       │   ├── rewards/route.ts · [id]/route.ts # ✅ rewards catalogue CRUD
+   389→  1388→  1388→    │       │   ├── rewards/verify/[token]/route.ts  # ✅ staff cashier verification
+   390→  1389→  1389→    │       │   ├── reservations/[id]/complete/route.ts # ✅ earn-on-visit trigger
+   391→  1390→  1390→    │       │   ├── campaigns/route.ts · preview/route.ts · [id]/send/route.ts # ✅
+   392→  1391→  1391→    │       │   ├── menu/route.ts · [id]/route.ts    # ✅ menu CRUD
+   393→  1392→  1392→    │       │   ├── knowledge/route.ts · ingest/route.ts · [id]/route.ts · [id]/reingest/route.ts # ✅
+   394→  1393→  1393→    │       │   ├── concierge/test/route.ts          # ✅ grounded test box backend
+   395→  1394→  1394→    │       │   ├── settings/restaurant/route.ts     # ✅ capacity/avg-spend/hours
+   396→  1395→  1395→    │       │   ├── settings/knowledge/route.ts       # ✅ Quick Answers save
+   397→  1396→  1396→    │       │   ├── settings/logo/route.ts             # ✅ Vercel Blob upload
+   398→  1397→  1397→    │       │   ├── whatsapp/connect/route.ts · status/route.ts # ✅
+   399→  1398→  1398→    │       │   ├── billing/checkout/route.ts          # ✅ PayFast signed-fields builder
+   400→  1399→  1399→    │       │   ├── brief/today/route.ts                # ✅ dashboard daily-brief API
+   401→  1400→  1400→    │       │   └── admin/
+   402→  1401→  1401→    │       │       ├── tenants/route.ts                # ✅
+   403→  1402→  1402→    │       │       ├── prospects/route.ts · upload/route.ts · [id]/invite/route.ts # ✅
+   404→  1403→  1403→    │       │       ├── broadcast/route.ts               # ✅
+   405→  1404→  1404→    │       │       └── webhooks/route.ts                 # ✅
+   406→  1405→  1405→    │       │
+   407→  1406→  1406→    │       ├── webhooks/
+   408→  1407→  1407→    │       │   ├── evolution/route.ts   # ✅ inbound WhatsApp — ⚠ signature verification GAP (Track B)
+   409→  1408→  1408→    │       │   └── payfast/route.ts     # ✅ IPN — all 4 checks implemented
+   410→  1409→  1409→    │       │
+   411→  1410→  1410→    │       └── cron/
+   412→  1411→  1411→    │           ├── reservation-reminders/route.ts  # ✅
+   413→  1412→  1412→    │           ├── review-requests/route.ts          # ✅
+   414→  1413→  1413→    │           ├── daily-brief/route.ts               # ✅
+   415→  1414→  1414→    │           ├── status-recalc/route.ts              # ○ RECOMMENDED (Track C2)
+   416→  1415→  1415→    │           └── recovery-ladder/route.ts             # ○ RECOMMENDED (Track C1)
+   417→  1416→  1416→    │
+   418→  1417→  1417→    ├── modules/
+   419→  1418→  1418→    │   ├── tenants/           service.ts · actions.ts (claim, settings)
+   420→  1419→  1419→    │   ├── guests/             service.ts
+   421→  1420→  1420→    │   ├── loyalty/             service.ts   # ✅ JOIN/BALANCE/STOP, earn-on-visit
+   422→  1421→  1421→    │   ├── rewards/             service.ts   # ✅ REDEEM, GPS claim validation
+   423→  1422→  1422→    │   ├── reservations/        service.ts   # ✅ create/cancel/reschedule/complete/checkAvailability/markNoShow
+   424→  1423→  1423→    │   ├── bookings/             service.ts   # ✅ AI extraction, draft state machine, cancel/reschedule orchestration
+   425→  1424→  1424→    │   ├── waitlist/              service.ts   # ✅ join, offerFreedTable, accept
+   426→  1425→  1425→    │   ├── reviews/               service.ts   # ✅ capture + sentiment routing
+   427→  1426→  1426→    │   ├── campaigns/             service.ts   # ✅ presets, audience, ROI, send, attribution
+   428→  1427→  1427→    │   ├── concierge/
+   429→  1428→  1428→    │   │   ├── tools.ts          # ✅ getMenu, getBusinessInfo, getSpecials, getLoyaltyBalance,
+   430→  1429→  1429→    │   │   │                     #    searchKnowledge, getQuickAnswers
+   431→  1430→  1430→    │   │   ├── service.ts        # ✅ answerWithConcierge — grounded system prompt + tool loop
+   432→  1431→  1431→    │   │   └── router.ts         # ✅ routeInboundMessage — the ordered dispatcher (plan.md §10)
+   433→  1432→  1432→    │   ├── knowledge/             service.ts   # ✅ ingest/reingest/delete/search (RAG)
+   434→  1433→  1433→    │   ├── operations/
+   435→  1434→  1434→    │   │   └── daily-brief.ts    # ✅ builder + WhatsApp formatter
+   436→  1435→  1435→    │   │   └── checklists.ts     # ○ ROADMAP (Track C8)
+   437→  1436→  1436→    │   ├── whatsapp/
+   438→  1437→  1437→    │   │   └── send.ts           # ✅ sendMessageToGuest / sendMessageToOwner / sendPlatformMessage
+   439→  1438→  1438→    │   ├── recovery/               # ○ RECOMMENDED NEW MODULE (Track C1)
+   440→  1439→  1439→    │   └── delight/                 # ○ RECOMMENDED NEW MODULE (Track C3) — VIP, birthday, anniversary
+   441→  1440→  1440→    │
+   442→  1441→  1441→    ├── lib/
+   443→  1442→  1442→    │   ├── db/index.ts (nullable client) · schema.ts (full schema — assembled per Track A1)
+   444→  1443→  1443→    │   ├── integrations/
+   445→  1444→  1444→    │   │   ├── evolution/
+   446→  1445→  1445→    │   │   │   ├── lifecycle.ts   # ✅ Global key — createInstance/getQrCode/getConnectionState
+   447→  1446→  1446→    │   │   │   └── client.ts       # ✅ per-tenant token — sendText
+   448→  1447→  1447→    │   │   └── payfast/
+   449→  1448→  1448→    │   │       ├── signature.ts   # ✅ order-preserved MD5
+   450→  1449→  1449→    │   │       ├── plans.ts        # ✅ 2 plans defined — ties to PRD.md §11 pricing decision
+   451→  1450→  1450→    │   │       └── client.ts
+   452→  1451→  1451→    │   ├── webhooks/log.ts        # ✅ logWebhookEvent()
+   453→  1452→  1452→    │   └── ai/provider.ts          # ○ RECOMMENDED — thin indirection over direct openai() calls
+   454→  1453→  1453→    │
+   455→  1454→  1454→    ├── shared/
+   456→  1455→  1455→    │   ├── constants/
+   457→  1456→  1456→    │   └── utils/
+   458→  1457→  1457→    │       ├── tenant-context.ts   # ✅ requireTenantContext()
+   459→  1458→  1458→    │       ├── super-admin.ts       # ✅ requireSuperAdmin()
+   460→  1459→  1459→    │       └── geo.ts                # ○ RECOMMENDED — move haversineMeters() here from modules/rewards
+   461→  1460→  1460→    │
+   462→  1461→  1461→    └── components/
+   463→  1462→  1462→        ├── ui/                       # shadcn/ui primitives
+   464→  1463→  1463→        ├── marketing/invite-form.tsx
+   465→  1464→  1464→        ├── hub/hub-client.tsx
+   466→  1465→  1465→        ├── rewards/geo-claim-client.tsx
+   467→  1466→  1466→        ├── claim/claim-client.tsx
+   468→  1467→  1467→        ├── dashboard/  campaigns-client.tsx  menu-manager.tsx  hub-qr.tsx
+   469→  1468→  1468→        ├── settings/
+   470→  1469→  1469→        │   ├── concierge-settings.tsx   # teach (URL/PDF), learned sources, test box
+   471→  1470→  1470→        │   ├── quick-answers.tsx
+   472→  1471→  1471→        │   ├── whatsapp-connect.tsx
+   473→  1472→  1472→        │   ├── restaurant-setup.tsx
+   474→  1473→  1473→        │   ├── rewards-manager.tsx
+   475→  1474→  1474→        │   └── billing-client.tsx
+   476→  1475→  1475→        └── admin/
+   477→  1476→  1476→            ├── admin-nav.tsx  tenants-client.tsx  prospects-client.tsx
+   478→  1477→  1477→            ├── broadcast-client.tsx  webhooks-client.tsx
+   479→  1478→  1478→
+   480→  1479→  1479→Notes on this structure
+   481→  1480→  1480→
+   482→  1481→  1481→  - Every route handler's body is: authenticate → resolve tenant (or verify
+   483→  1482→  1482→    super-admin, or verify webhook/cron secret) → validate → call a modules/*
+   484→  1483→  1483→    function → respond. No exceptions found in the code reviewed — keep it that
+   485→  1484→  1484→    way as new routes are added.
+   486→  1485→  1485→  - modules/concierge/router.ts is the single dispatch point for every inbound
+   487→  1486→  1486→    WhatsApp message. It is intentionally a plain, ordered function (plan.md
+   488→  1487→  1487→    §10) — do not introduce a second routing mechanism elsewhere.
+   489→  1488→  1488→  - modules/whatsapp/send.ts is the single outbound gateway. No module should
+   490→  1489→  1489→    call the Evolution client directly for sending; only
+   491→  1490→  1490→    lib/integrations/evolution/lifecycle.ts is called directly, and only from
+   492→  1491→  1491→    tenant-connect and Super Admin flows.
+   493→  1492→  1492→  - Two new modules recommended, not yet present: modules/recovery/ (Track C1)
+   494→  1493→  1493→    and modules/delight/ (Track C3) — both are pure additions, no existing
+   495→  1494→  1494→    module needs to change to accommodate them.
+   496→  1495→  1495→  - The Restaurant Hub and its menu sub-page belong together (r/[slug]/ and
+   497→  1496→  1496→    r/[slug]/menu/) but the menu page is the one visible gap in an otherwise
+   498→  1497→  1497→    complete Hub.
+   499→  1498→  1498→
+   500→  1499→  1499→plan.md
+   501→
+   502→[showing lines 1000-1499 of 1953; use offset=1500 with limit to continue reading]

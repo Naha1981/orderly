@@ -1,88 +1,98 @@
 # Orderly — Technical & Architecture Plan
 
-**Version:** 1.0
-**Companion to:** PRD.md (product requirements) and execution-plan.md (build phases)
+**Version:** 2.0 — full-system revision, reconciled against code already written
+**Companion to:** PRD.md (what to build), execution-plan.md (how to sequence it)
 **Stack baseline:** Node.js / Next.js — no Supabase, no FastAPI, no separate backend service
 
 ---
 
-## 1. Purpose of This Document
+## 1. Purpose & What Changed
 
-This is the single source of truth for *how* Orderly is built. Every build-phase prompt in execution-plan.md must be consistent with the decisions recorded here. If a future session (human or AI) proposes a different database, auth provider, or a separate backend service, that proposal must be checked against this document first — see §3.
+v1 of this plan specified a **generic, data-driven automation rules engine** (an `automation_rules` table, a condition evaluator, an action executor) as the mechanism for all 40+ automations. That is not how the system was actually built. The real implementation uses a **direct, ordered router** in code — `routeInboundMessage()` checks keywords, then booking state, then falls through to the AI concierge — with each automation living as a normal function in a normal service module, and scheduled automations as normal cron-triggered route handlers calling those same service functions.
+
+This version documents **the architecture as it exists**, keeps what's working, and makes concrete, incremental recommendations (not a rewrite) where the real implementation has gaps. Where v1's abstractions don't match reality, they're dropped.
 
 ---
 
 ## 2. Architecture Philosophy
 
-- **Modular monolith, not microservices.** One repository, one deployment, one database, one auth provider, one AI SDK, one WhatsApp provider. Split into separate services only when a real, measured production constraint proves it necessary — never pre-emptively.
-- **Organise by business capability, not technical layer.** Code lives in `modules/loyalty/`, `modules/campaigns/`, `modules/messaging/` — not in a generic `controllers/` or `services/` bucket.
-- **Extraction-ready, not extracted.** Services are framework-agnostic functions callable from Route Handlers, cron jobs, or (later) a standalone worker — so pulling one module out later is a mechanical move, not a rewrite.
-- **One choice per layer.** Every layer of the stack has exactly one accepted tool. Fewer decisions in the moment means fewer inconsistencies across build sessions — especially important since this project will be built across multiple AI coding sessions and possibly multiple tools (chat.z.ai, VS Code, Claude Code).
-- **Correctness and tenant safety first, velocity second, cost third.** In that order, always.
+Unchanged from v1, and consistently followed in the real code:
+
+- **Modular monolith, not microservices.** One repository, one deployment, one database, one auth provider, one WhatsApp provider.
+- **Organise by business capability.** `modules/loyalty/`, `modules/reservations/`, `modules/campaigns/` — not generic `controllers/`/`services/` buckets.
+- **Thin routes, rich services.** Every Route Handler's body is: authenticate → resolve tenant → validate (Zod) → call a service function → return a response. Confirmed consistently applied across the real code.
+- **Read secrets inside the function body, never at module load.** This pattern shows up repeatedly in the real implementation (Vercel Blob token, PayFast credentials, Evolution keys) and is worth stating as a formal principle: a missing credential should degrade a single request gracefully, never crash a build or every request.
+- **Correctness and tenant safety first, velocity second, cost third.**
 
 ---
 
 ## 3. Locked Tech Stack
 
-| Layer | Choice | Why |
+| Layer | Choice | Notes from the real implementation |
 |---|---|---|
-| Framework | Next.js (App Router) + TypeScript, strict mode | Frontend and backend in one repo, one build, one deploy |
-| Runtime | Node.js 20 LTS | Standard, stable, matches Vercel's supported runtime |
-| UI | Tailwind CSS + shadcn/ui | Consistent design tokens, no ad-hoc styling |
-| Forms & validation | React Hook Form + Zod | Shared client/server schemas |
-| Client data fetching | TanStack Query | Caching, retries, loading states without hand-rolled `useEffect` fetches |
-| Client state | Zustand, only where server state is insufficient | Avoid unnecessary client state |
-| Database | **Neon PostgreSQL** | Serverless Postgres, generous free tier, connection pooling, standard SQL — not a BaaS |
-| ORM | **Drizzle ORM** + `drizzle-kit push` | Typed queries, no manual migration files to babysit |
-| Auth | **Clerk** | Managed auth, session handling, and middleware gating — zero hand-rolled auth code |
-| AI | **Vercel AI SDK** | Provider-agnostic (swap model providers without touching call sites); used for the weekly insight generator, grounded via tool calls |
-| WhatsApp | **Evolution API**, self-hosted on Render | One instance per tenant; abstracted behind a provider interface (see §11) |
-| Payments | **PayFast** | South African market fit; webhook is the source of truth, never the browser redirect |
-| File storage | Vercel Blob | Logos, QR posters — no S3/bucket configuration |
-| Deployment | **Vercel** (app) | Serverless, preview deploys, free tier |
-| Background/cron | GitHub Actions (frequent) + Vercel Cron (infrequent) | Free-tier-friendly scheduling, no separate worker infra |
-| Testing | Vitest (unit) + Playwright (E2E, run against the deployed URL, not just localhost) | |
-| Version control | GitHub | One repo, GitHub Actions for CI and cron |
+| Framework | Next.js (App Router) + TypeScript, strict | |
+| Runtime | Node.js 20 LTS | |
+| UI | Tailwind CSS + shadcn/ui | |
+| Forms & validation | React Hook Form + Zod | |
+| Client data fetching | TanStack Query | Used throughout: campaigns, concierge settings, admin views |
+| Client state | Zustand, only where server state is insufficient | |
+| Database | **Neon PostgreSQL** | Also hosts **pgvector** for the knowledge base (`CREATE EXTENSION vector`) |
+| ORM | **Drizzle ORM** + `drizzle-kit push` | |
+| Auth | **Clerk** | Claim flow embeds `<SignIn>`/`<SignUp>` inline via `routing="virtual"` rather than redirecting to separate pages — a deliberate implementation choice worth preserving |
+| AI | **Vercel AI SDK** | `generateText` (concierge replies), `generateObject` (booking-detail extraction), `embed`/`embedMany` (knowledge ingestion + retrieval). **Note:** the current implementation calls `openai(...)` directly at call sites rather than through a swappable provider abstraction — a minor deviation from the "provider-agnostic" principle, worth wrapping in a thin `lib/ai/provider.ts` indirection so a future model swap is a one-file change |
+| Embeddings | OpenAI `text-embedding-3-small` | 1536 dimensions, stored in `knowledge_chunks.embedding` |
+| PDF parsing | `unpdf` | For menu/document uploads |
+| URL-to-text | Jina Reader (`https://r.jina.ai/<url>`) | Free third-party service — external dependency worth monitoring, has no SLA |
+| WhatsApp | **Evolution API**, self-hosted on Render | One instance per tenant, plus a **separate platform instance** for Super Admin invites/broadcasts |
+| Payments | **PayFast** | Order-preserved (Custom Integration) MD5 signature — confirmed correct scheme in the real code, not the REST API's alphabetical scheme |
+| File storage | Vercel Blob | Logos |
+| QR generation | `qrcode.react` | Hub QR download, reward-claim cashier QR |
+| CSV parsing | Hand-rolled quoted-field parser (current) | **Recommend swapping to `papaparse`** for robustness — flagged as a gap, not yet fixed |
+| Deployment | **Vercel** (app) | |
+| Background/cron | GitHub Actions, every 30 minutes for reminders/reviews; daily for the manager brief | |
+| Version control | GitHub | |
 
-### Explicitly rejected for this project
+### Explicitly rejected
 
-- **No Supabase** — not for auth, not for database, not for storage, not for Edge Functions. Neon + Drizzle + Clerk + Vercel Blob + Next.js Route Handlers cover the same ground with one fewer vendor and no platform lock-in to a BaaS's tooling.
-- **No FastAPI or any Python backend.** No second runtime, no second deploy target, no second set of environment variables to keep in sync.
-- **No separate Express/NestJS microservice.** Automations, webhooks, and cron handlers are Next.js Route Handlers in the same repo as the dashboard.
-- **No workflow-canvas tool (n8n, Zapier, Make).** All 40+ automations are implemented in code as a rules-driven engine (§9) — see execution-plan.md for the rationale already validated for this project: cost, tenant-isolation correctness, and version control all favour code over a visual canvas at this scale.
+No Supabase, no FastAPI/Python backend, no separate Express/NestJS microservice, no workflow-canvas tool (n8n/Zapier/Make). All automations are code in this one repository.
 
 ---
 
 ## 4. High-Level Architecture
 
 ```
-                         ┌──────────────────────────┐
-                         │      Vercel (Next.js)     │
-                         │  ── one deploy target ──  │
-                         │                            │
-  Browser (owner) ─────► │  App Router UI             │
-  Browser (customer) ──► │  Route Handlers  (/api/v1) │
-                         │  Webhooks        (/webhooks)│
-                         │  Cron dispatch   (/api/cron)│
-                         │  Server Actions             │
-                         └───────────┬────────────────┘
-                                     │
-              ┌──────────────────────┼───────────────────────┐
-              │                      │                        │
-      ┌───────▼───────┐     ┌────────▼────────┐      ┌────────▼────────┐
-      │ Neon Postgres  │     │  Clerk (Auth)    │      │  Vercel AI SDK   │
-      │  via Drizzle   │     │                  │      │ (weekly insight) │
-      └────────────────┘     └──────────────────┘      └──────────────────┘
+                         ┌───────────────────────────────────┐
+                         │           Vercel (Next.js)          │
+                         │                                      │
+  Browser (owner) ─────► │  App Router UI (dashboard, admin)   │
+  Browser (guest) ─────► │  Restaurant Hub  (/r/[slug])        │
+                         │  Route Handlers  (/api/v1/*)         │
+                         │  Webhooks (evolution, payfast)       │
+                         │  Cron dispatch  (/api/cron/*)        │
+                         └──────────────┬───────────────────────┘
+                                        │
+        ┌───────────────────────────────┼───────────────────────────────┐
+        │                               │                                │
+┌───────▼────────┐           ┌──────────▼─────────┐            ┌─────────▼─────────┐
+│ Neon Postgres    │           │  Clerk (Auth)        │            │  Vercel AI SDK      │
+│  + pgvector       │           │                      │            │  (concierge, booking │
+│  via Drizzle       │           │                      │            │   extraction, insight)│
+└────────────────┘           └──────────────────────┘            └────────────────────┘
 
-              ┌──────────────────────┼───────────────────────┐
-              │                      │                        │
-      ┌───────▼────────┐    ┌────────▼─────────┐    ┌─────────▼────────┐
-      │ Evolution API   │    │     PayFast       │    │   Vercel Blob     │
-      │ (Render, 1      │    │  (billing, webhook │    │  (logos, QR       │
-      │  instance/tenant)│    │   is truth)        │    │   posters)        │
-      └─────────────────┘    └────────────────────┘    └────────────────────┘
+┌───────────────────┐   ┌────────────────────┐   ┌────────────────────┐   ┌───────────────────┐
+│ Evolution API       │   │ Evolution API        │   │     PayFast          │   │   Vercel Blob        │
+│ (per-tenant           │   │ (platform instance —  │   │  (billing, IPN=truth)│   │  (logos)             │
+│  instances, Render)   │   │  invites/broadcasts)   │   └────────────────────┘   └───────────────────┘
+└───────────────────┘   └────────────────────┘
 
-GitHub Actions: CI on push · cron dispatch (frequent) · Evolution keep-warm ping
+Inbound guest message → Evolution webhook → persist to webhook_events →
+  routeInboundMessage(): keywords → cancel/reschedule → confirm/waitlist-accept →
+  continue booking draft → new booking intent → review-reply capture →
+  AI concierge (tools + RAG) → hardcoded fallback menu
+
+GitHub Actions: reservation-reminders (30 min) · review-requests (30 min) ·
+  daily-brief (daily) · [recommended new] status-recalc (daily) ·
+  [recommended new] recovery-ladder (daily) · Evolution keep-warm ping
 ```
 
 ---
@@ -91,230 +101,262 @@ GitHub Actions: CI on push · cron dispatch (frequent) · Evolution keep-warm pi
 
 ```
 src/
-  app/                          # Next.js App Router
-    (marketing)/                # Public landing page
-    (app)/                      # Authenticated owner dashboard
-    (super-admin)/              # Internal admin (prospects, broadcasts, webhook log)
-    claim/[token]/               # Invite-only onboarding
-    geo-claim/[eventId]/         # GPS-gated reward claim page
+  app/
+    (marketing)/                 # public landing page
+    (app)/ or top-level pages    # dashboard/ campaigns/ setup/ menu/ settings/ billing/
+    admin/                       # Super Admin: overview, tenants, prospects, broadcast, webhooks
+    claim/[token]/                # invite-only onboarding (Clerk inline)
+    geo-claim/[token]/            # GPS-gated reward claim
+    r/[slug]/                     # Restaurant Hub (public)
+    r/[slug]/menu/                # public menu page — GAP, not yet built
     api/
-      webhooks/                 # evolution/  payfast/
-      v1/                       # authenticated + public JSON API
-      cron/                     # secured cron entry points
-  modules/                      # business domains — the heart of the system
-    tenants/
-    customers/
-    loyalty/
-    campaigns/
-    messaging/                  # the central messaging engine
-    automation/                 # the rules engine
-    recovery/
-    intelligence/                # weekly insight generation
-    billing/
-    admin/
+      webhooks/evolution/          # inbound WhatsApp — verify → log → route
+      webhooks/payfast/            # IPN — 4-check validation
+      v1/                          # authenticated + public JSON API
+      cron/                        # secured scheduled entry points
+
+  modules/
+    tenants/                     # tenant CRUD, claim action, settings actions
+    guests/                      # guest CRUD (the "customers" table is named `guests`)
+    loyalty/                     # JOIN/BALANCE/STOP, earn-on-visit
+    rewards/                     # REDEEM, GPS claim validation, cashier verify
+    reservations/                # createReservation, cancelReservation, rescheduleReservation,
+                                  #   checkAvailability, markNoShow, completeReservation
+    bookings/                    # the AI booking engine: extraction, draft state machine,
+                                  #   cancel/reschedule/confirm-attendance orchestration
+    waitlist/                    # join, offer-freed-table, accept
+    reviews/                     # capture, sentiment routing
+    campaigns/                   # presets, audience builder, ROI estimate, send, attribution
+    concierge/                   # tools.ts, service.ts, router.ts (the AI + inbound router)
+    knowledge/                   # ingest (URL/PDF), reingest, delete, search (RAG)
+    operations/                  # daily-brief.ts (others are roadmap)
+    whatsapp/                    # send.ts (per-tenant + platform sends), lifecycle.ts (instance mgmt)
+    admin/ (or shared/utils/super-admin.ts)   # super-admin guard + cross-tenant reads
+
   lib/
-    db/                         # Drizzle client + schema
+    db/                          # nullable Drizzle client + full schema
     integrations/
-      evolution/                # WhatsApp client
-      payfast/                  # payment client
-    events/                     # domain event bus
-    ai/                         # Vercel AI SDK provider setup + tools
+      evolution/                 # split: lifecycle (Global key) vs send (per-tenant token)
+      payfast/                   # signature.ts (order-preserved MD5), plans.ts, client.ts
+    webhooks/log.ts              # logWebhookEvent() — the webhook_events writer
+    ai/provider.ts               # RECOMMENDED — thin indirection over the AI SDK provider
+
   shared/
     constants/
-    types/
     utils/
+      tenant-context.ts          # requireTenantContext()
+      super-admin.ts             # requireSuperAdmin()
+      geo.ts                     # RECOMMENDED — move haversineMeters() here from modules/rewards
 ```
-
-Full annotated tree with every planned file: see **file-structure.md**.
 
 ### Module contract
 
-Every module owns its service functions, Zod schemas, and the parts of the schema it's responsible for. Modules talk to each other through **exported service functions and domain events** — never by importing another module's Drizzle table and querying it directly. This is what keeps the "extraction-ready" promise real.
-
-### Layering rule
-
-Route Handlers are thin: authenticate (Clerk `auth()`) → resolve tenant context → validate input (Zod) → call a service function → return a typed response. All business logic lives in `modules/*/service.ts`.
+Unchanged principle: modules own their service functions and the tables they're primarily responsible for; cross-module calls happen through exported functions (`sendMessageToGuest`, `checkAvailability`, `attributeRedemptionToCampaign`), which is exactly the pattern already in use — `modules/bookings` calls `modules/reservations`, `modules/rewards` calls `modules/campaigns`' attribution function, etc.
 
 ---
 
 ## 6. Multi-Tenancy Model
 
-Every business-data table carries a `tenant_id` column, indexed, not nullable.
+Confirmed consistently applied in the real code: every service function takes `tenantId` explicitly as a parameter, and every query includes an explicit `eq(table.tenantId, tenantId)` (usually combined with the row's own id via `and(...)`).
 
-Because Neon is queried directly through Drizzle (no managed row-level-security layer like Supabase provides out of the box), tenant isolation is a **discipline that must be enforced by construction, not convention**:
+**What's missing:** a single, mandatory wrapper (`scopedDb(tenantId)`) that makes an unscoped query structurally impossible, and any Postgres RLS as a second, database-enforced layer. At ~20 tables and dozens of routes, manual discipline has held so far but doesn't scale indefinitely.
 
-1. **Mandatory query wrapper.** Every service function that reads or writes a business table takes a `tenantId` as its first argument and routes through a shared `scopedDb(tenantId)` helper that automatically applies `WHERE tenant_id = $1` — a raw, unscoped query against a tenant table is a code-review blocker.
-2. **Tenant context resolved once per request.** A single `getTenantContext()` utility (Clerk session → staff profile → tenant) is the only source of the active `tenantId` for a request; it is never re-derived ad hoc inside a handler.
-3. **Defense in depth (recommended before scaling past the first cohort).** Neon is standard Postgres, so **Postgres Row-Level Security (RLS) policies** can be layered on top of the application-level scoping as a second, database-enforced barrier — this is optional for MVP but strongly recommended once real paying tenants' data is at stake. Tracked as a Phase 2 hardening item in execution-plan.md.
-4. **Super Admin is the only legitimate cross-tenant reader**, and every cross-tenant query it runs is isolated to `modules/admin/service.ts`, not scattered across the codebase.
+**Recommendation, in priority order:**
+1. Immediate: a lightweight lint rule or code-review checklist item — "does this query include a tenant filter?" — since introducing the wrapper retroactively across this much code is itself a project.
+2. Before scaling tenant count meaningfully: introduce Postgres RLS policies on the highest-risk tables (`guests`, `loyalty_transactions`, `reservations`, payment-related fields) as defense-in-depth.
+3. For any *new* module going forward: build it against a `scopedDb()` helper from day one so the pattern doesn't keep compounding.
 
 ---
 
-## 7. Data Model Overview (MVP)
+## 7. Data Model
 
-Conceptual entities only — full Drizzle schema is written during Phase 1 of execution-plan.md, not duplicated here.
+Conceptual list, consolidated from the actual schema additions made across the build (Drizzle DDL is written in the codebase itself, not duplicated here).
 
 | Table | Purpose |
 |---|---|
-| `tenants` | One row per restaurant: branding, industry, WhatsApp connection state, plan, trial status |
-| `staff_profiles` | Clerk-linked users per tenant; role = owner / manager / staff / super_admin |
-| `customers` | Loyalty members: phone, name, points balance, status (active/at_risk/dormant/vip/opted_out) |
-| `loyalty_transactions` | **Append-only** ledger of every point earn/redeem/adjust — never updated or deleted |
-| `rewards_catalog` | Configurable rewards per tenant |
-| `reward_redemptions` | GPS-gated claim events: token, expiry, claimed status, location check result |
-| `campaigns` | The three owner campaigns plus any future campaign type; goal, audience filter, status |
-| `campaign_recipients` | Per-recipient send + attribution record |
-| `messages` | Every inbound and outbound message, any channel — the messaging engine's log |
-| `automation_rules` | Trigger/condition/action definitions — the rules engine's data (§9) |
-| `automation_runs` | Idempotent execution log per rule firing |
-| `webhook_events` | Raw payload audit trail for every inbound webhook, before processing |
-| `payment_transactions` | PayFast checkout + IPN records |
-| `prospects` | Super Admin invite-only pipeline |
-| `weekly_insights` | Cached generated reports per tenant per week |
+| `tenants` | Restaurant profile: branding, slug, industry, cuisine, address, GPS, opening hours, capacity, avg spend, currency name, plan/status/trial, WhatsApp instance name+token+connected flag+phone, PayFast token, `smart_page_config` (rating/tagline/specials), `knowledge_base` (Quick Answers jsonb), Google review URL |
+| `profiles` | Clerk-linked staff: `clerkId`, `tenantId`, role (owner/manager/staff/super_admin), name, phone |
+| `guests` | Loyalty + CRM record: phone, name, birthday, status, points balance, visits, spend, joined/last-visit/opted-out timestamps, allergies, source |
+| `loyalty_transactions` | Append-only ledger: type (join_bonus/earn/redeem/adjust), points, description |
+| `rewards_catalog` | Configurable rewards: name, points cost, active flag |
+| `reward_events` | GPS-gated claims: claim token, status, expiry, claimed-at, GPS coordinates at claim time |
+| `reservations` | Bookings: date/time/party size, occasion, special requests, allergies, status, booking ref, source, reminder flags (48h/24h/6h), guest-confirmed flag, completed-at, review-requested-at |
+| `booking_drafts` | AI booking-in-progress state: phone-scoped, TTL'd, fields filled in incrementally, `reschedule_of` link when rescheduling |
+| `waitlist` | Waiting parties: phone, party size, preferred date/time, status, notified/expiry timestamps |
+| `reviews` | Post-meal feedback: rating, sentiment, text, routing decision, manager-alerted flag |
+| `campaigns` | Owner campaigns: type/preset, message template, audience filter, audience count, status, sent-at, **real** redemption count + revenue |
+| `campaign_recipients` | Per-send attribution record, used for last-touch (7-day window) redemption attribution |
+| `menu_items` | Category, name, description, price, dietary tags, availability, sort order |
+| `knowledge_sources` | Ingested URL/PDF metadata: status (processing/ready/failed), error |
+| `knowledge_chunks` | Embedded text chunks per source, `pgvector` embedding column |
+| `prospects` | Super Admin invite pipeline: business name, phone, industry, status, claim token, invited-at, resulting tenant id |
+| `webhook_events` | Raw inbound payload audit: source, event type, tenant, processed flag, error |
 
-Deferred to Phase 2/3 (not created in MVP schema): `reservations`, `reviews`, `menu_items`, `operations_checklists`, `inventory_items` — see PRD.md §7.2–7.3.
-
----
-
-## 8. The Messaging Engine
-
-**Requirement source:** PRD.md §8. This is core platform infrastructure, built once, used by every feature that sends a message.
-
-Design:
-
-- **`modules/messaging/service.ts`** exposes `sendMessage(tenantId, to, content, context)` as the *only* path any code — keyword router, automation engine, campaign sender, weekly insight delivery — is allowed to use to send an outbound message.
-- **Channel-provider interface.** `MessageChannel` is an interface (`send(to, content) → Result`) implemented today by `WhatsAppEvolutionChannel`. SMS/email providers can implement the same interface later without touching any calling code — this is what makes "future expansion into additional communication channels" (per the product brief) a configuration change, not a rewrite.
-- **Rate limiting.** A per-tenant token-bucket limiter protects each WhatsApp session from being flagged for sending too fast, especially during bulk campaign sends.
-- **Retry & error handling.** Transient provider failures retry with backoff; permanent failures (disconnected instance, invalid number) are logged and surfaced, never thrown uncaught — an automation firing against a disconnected tenant must degrade, not crash the run.
-- **Logging & attribution.** Every send (success or failure) is written to `messages` with `campaign_id` / `automation_id` linkage, which is what makes campaign ROI and weekly insights possible.
-- **Idempotency.** Sends triggered by automations carry an idempotency key derived from the triggering event, so a retried cron run or a re-processed webhook can never double-send.
+Deferred/roadmap tables (not yet needed): dedicated `operations_checklists`, `inventory_items`, a `payment_transactions` table beyond the PayFast token already on `tenants`.
 
 ---
 
-## 9. The Automation Engine
+## 8. The Messaging Gateway
 
-**Requirement source:** PRD.md §9. Built as a general rules engine, not as 40 hardcoded functions — new automations are added as **data rows**, not new deploys, once the engine exists.
+**As designed and largely confirmed in the real code:** `sendMessageToGuest`, `sendMessageToOwner`, and `sendPlatformMessage` in `modules/whatsapp/send.ts` are the only sanctioned paths to send an outbound message.
 
-Four trigger mechanisms, one execution path:
+- `sendMessageToGuest` / `sendMessageToOwner` use the **tenant's own** Evolution instance and per-tenant token.
+- `sendPlatformMessage` uses a **dedicated platform Evolution instance** (separate credentials: `PLATFORM_INSTANCE_NAME`/`PLATFORM_INSTANCE_TOKEN`/`PLATFORM_PHONE`) — used only for Super Admin invites and broadcasts, so a tenant never appears to message itself with platform content.
+- Every send should log to a message/audit table and degrade gracefully (never throw) on failure — this was the original design and should be verified present on every call site as part of the assembly pass (execution-plan.md Track A).
 
-| Mechanism | Fires from | Examples (MVP) |
+**Confirmed gaps against the original design intent:** rate limiting (protecting a tenant's WhatsApp session from bulk-send bans) and retry-with-backoff on transient failures are not confirmed present in the code as shown. Campaign sends are currently sequential with no throttle — acceptable at pilot scale, a real risk once a tenant has hundreds of guests in one campaign.
+
+---
+
+## 9. The AI Concierge
+
+**Grounding rule (enforced by construction, confirmed in the real implementation):** the model composes language; every fact comes from a tool call or the knowledge base.
+
+- **Quick Answers first.** Structured facts (hours, parking, dress code, dietary/halal, pets, wifi, kids, location, payment) live as jsonb on `tenants.knowledgeBase` and are checked by a dedicated `getQuickAnswers` tool before the model reaches for RAG — instant, reliable answers to the questions guests ask most.
+- **Tools for structured, changing data.** `getMenu`, `getBusinessInfo`, `getSpecials`, `getLoyaltyBalance` query the live database directly — never RAG, so prices and hours are never stale.
+- **RAG for unstructured knowledge.** `searchKnowledge` embeds the guest's question and retrieves the top-N most similar chunks from `knowledge_chunks`, scoped by `tenant_id`. The knowledge ingestion pipeline (URL via Jina Reader, or PDF via `unpdf`) chunks, embeds, and stores; a re-ingest path refreshes a URL source when the underlying site changes.
+- **Transparency in testing.** The Settings → Concierge test box shows not just the answer but the exact snippets and similarity scores it used — a genuinely good verification tool, worth keeping and eventually exposing (in a limited form) to owners as ongoing trust-building.
+- **Failure mode:** if the AI call errors for any reason, the router falls back to a hardcoded keyword menu rather than leaving the guest unanswered — confirmed present and correct.
+
+### The booking sub-engine
+
+A distinct, more complex piece worth documenting on its own: `generateObject` extracts `{date, time, partySize, occasion, specialRequests}` from free text (resolving relative dates like "Friday" against the current date); a `booking_drafts` row persists partial progress across multiple messages with a 30-minute TTL; once all required fields are present, the deterministic `modules/reservations` service creates the real reservation (never the AI directly) and a confirmation is sent. Cancel and reschedule reuse the same draft mechanism (`reschedule_of` links a draft back to the reservation being changed).
+
+---
+
+## 10. The Router
+
+**As built:** `routeInboundMessage(tenantId, phone, text)` is an ordered function, not a data-driven engine. Confirmed order, and the reasoning behind it:
+
+1. Deterministic keywords: `JOIN`, `BALANCE`/`POINTS`, `REDEEM`, `STOP`/`UNSUBSCRIBE`, `WAITLIST`
+2. `CANCEL` / `RESCHEDULE` — **checked before** general booking-intent matching, because phrases like "cancel my booking" contain a booking keyword and would otherwise be mis-routed
+3. `CONFIRM` / `YES` — tries waitlist-acceptance first, then attendance-confirmation; falls through if neither applies
+4. Continue an in-progress booking or reschedule draft
+5. New booking intent (keyword-hint match)
+6. Post-meal review-reply capture (only within a 48h window of a review request)
+7. Grounded AI concierge
+8. Hardcoded fallback menu, on any concierge error
+
+**Recommendation:** keep this exact pattern — it is simple, debuggable, and each step is independently testable — but as more automations are added, extract each numbered step into a small named matcher function (already mostly true) with a single top-level ordered list, so the ordering *rationale* (like the CANCEL-before-booking-intent case) is documented in one place rather than implied by code position alone. This is **not** a recommendation to introduce a generic `automation_rules` table — that abstraction doesn't fit how deterministic these first several steps genuinely are, and would add indirection without a real benefit until (if ever) the router needs to be edited by non-developers.
+
+---
+
+## 11. Scheduled Jobs
+
+| Job | Cadence | Confirmed status |
 |---|---|---|
-| Event-driven | Domain events emitted by services (`customer.joined`, `reward.redeemed`) | Welcome bonus, redemption confirmation |
-| Scheduled | Cron dispatch (`/api/cron/orchestrator`) | Daily status recalculation, weekly insight generation |
-| Inactivity | Time-since-last-event evaluated on a schedule | 30/45/60-day recovery ladder |
-| Manual | Owner taps a button | Fill Quiet Hours, Bring Back Lost Faces, Reward VIPs |
-
-Core pieces:
-
-- **Event bus** (`lib/events/bus.ts`) — services emit domain events; the automation engine (and future modules) subscribe without tight coupling.
-- **Rule engine** (`modules/automation/engine.ts`) — evaluates `automation_rules` rows against a trigger context, runs their condition, executes their action list.
-- **Condition evaluator** — small, pure, testable predicate functions (status equals, days-since-event greater-than, etc.).
-- **Action executor** — a fixed, reviewed set of action types (`send_message_to_customer`, `send_message_to_owner`, `adjust_points`, `create_reward_event`, `emit_event`) — never arbitrary code execution from rule data.
-- **Idempotent runs** — every rule firing is logged in `automation_runs` keyed by the triggering event, so cron retries and webhook redelivery can never double-fire an automation.
+| `reservation-reminders` | Every 30 min (GitHub Actions) | Built — idempotent via `reminder_48h/24h/6h_sent` flags, quiet-hours guarded (no sends before 7am or after 8pm server time — **needs timezone pin**) |
+| `review-requests` | Every 30 min | Built — 2h-after-completion window, 24h lookback cap |
+| `daily-brief` | Daily, ~06:00 SAST | Built — also exposed as an on-demand dashboard API |
+| `status-recalculation` | Daily | **Recommended addition** — closes the Pipeline 10 gap; formalises `active`/`at_risk`/`dormant`/`vip` transitions as a real scheduled job rather than an implied side effect |
+| `recovery-ladder` | Daily | **Recommended addition** — the single highest-priority pipeline gap (PRD.md §3.2, §7 Pipeline 6): automatic 30/45/60-day escalating win-back, independent of the owner manually running a campaign |
+| automation orchestrator (optional consolidation) | — | If the number of daily/30-min jobs grows, consider one dispatcher endpoint with a `cadence` parameter purely to reduce the number of separate GitHub Actions workflow files — not a functional requirement |
 
 ---
 
-## 10. AI Layer
+## 12. WhatsApp Integration
 
-- **Vercel AI SDK**, provider-agnostic — no hardcoded dependency on a single model vendor.
-- **Used for:** the weekly plain-English insight narrative (`modules/intelligence/service.ts`). The model is given real, pre-computed numbers (redemptions, new joins, campaign performance) via tool calls / structured input — it **composes the sentence, it never invents the numbers**. This mirrors the product principle in PRD.md §5.5.
-- **Not used for:** JOIN/BALANCE/REDEEM/STOP replies — these remain deterministic, rule-based responses for predictability and cost control. A future free-text AI concierge (Phase 3, PRD.md §7.3) will follow the same grounded-by-tool-call pattern before it ships.
+Two clients, cleanly separated per the two-credential rule:
 
----
+- **Lifecycle** (`lib/integrations/evolution/lifecycle.ts`): `createInstance`, `getQrCode`, `getConnectionState` — uses the **Global API Key**, called only from tenant-connect flows and Super Admin.
+- **Send** (`lib/integrations/evolution/client.ts` / `modules/whatsapp/send.ts`): `sendText` — uses the **per-tenant instance token**, never the Global key.
 
-## 11. WhatsApp Integration Architecture
+Confirmed correctly separated in the real code — this is the exact discipline the original architecture called for, and it held.
 
-- **One Evolution API instance per tenant**, hosted on Render (free tier to start).
-- **Two-credential model, strictly separated:**
-  - The **Global API Key** manages instance lifecycle only (create, reconnect, delete) — used exclusively by platform-level code (tenant onboarding, Super Admin).
-  - The **per-tenant instance token**, stored on the tenant record, is used exclusively for sending/receiving messages for that tenant.
-  - These must never be interchanged in code — this exact mistake has caused silent authentication failures in earlier iterations of this product and is treated as a standing implementation hazard to guard against explicitly in code review.
-- **Provider interface.** `WhatsAppEvolutionChannel` implements the generic `MessageChannel` interface (§8), so a future migration to the official WhatsApp Business Platform (Cloud API) for tenants at volume — flagged as a risk in PRD.md §3.2 — is a new implementation of the same interface, not an architecture change.
-- **Webhook-first.** All inbound WhatsApp events land on `/api/webhooks/evolution`, are persisted to `webhook_events` before any processing, and return `200` fast — processing (keyword routing, automation dispatch) happens after the raw event is safely stored.
+**Connect flow:** Settings → Connect WhatsApp → `createInstance` (first time) or `getQrCode` (reconnect) → QR rendered → client polls `/api/v1/whatsapp/status` every 3 seconds → `whatsappConnected` flips true once Evolution reports `state: "open"`.
+
+**Gap:** the inbound webhook does not verify `EVOLUTION_WEBHOOK_SECRET` (or an equivalent signature) before trusting the payload — see PRD.md §3.2, must-fix before launch.
 
 ---
 
-## 12. Payments Architecture
+## 13. Payments
 
-- **PayFast**, using the order-preserved (Custom Integration) signature scheme, not the REST API's alphabetical scheme — these are not interchangeable and using the wrong one produces silent signature-validation failures.
-- **Webhook (IPN) is the only source of truth for payment state** — a successful browser redirect back to the app is never treated as payment confirmation.
-- **Four required IPN checks, in order:** signature validity → request source IP → amount matches the stored pending transaction (with tolerance) → server-to-server validation callback to PayFast. All four must pass before a subscription is activated.
-- **Idempotent.** A redelivered IPN for an already-processed transaction is a no-op, not a duplicate activation.
+PayFast, Custom Integration order-preserved MD5 signature (confirmed correct — not the REST API's alphabetical scheme, which would silently fail validation). All four required checks implemented in the IPN handler: signature match, source IP (soft-enforced via a `PAYFAST_ENFORCE_IP` flag, hard-enforceable once the current PayFast IP ranges are reverified), amount matches a known plan, and a server-to-server validate callback to PayFast. Recurring subscription fields (`subscription_type=1`, `frequency=3` monthly, `cycles=0` until cancelled) are set on checkout.
 
----
-
-## 13. Auth & Identity
-
-- **Clerk**, no custom auth code, no session cookies hand-rolled.
-- Roles: `owner`, `manager`, `staff` (all tenant-scoped), `super_admin` (platform-level, Orderly team only).
-- Middleware gates all authenticated routes; public routes are explicitly listed (marketing pages, `claim/[token]`, `geo-claim/[eventId]`, webhook endpoints, health/selftest).
+**Gap:** only two plans (`starter`, `growth`) are defined; there is no feature-gating between them in code — see PRD.md §11 for the reconciliation decision needed before public pricing.
 
 ---
 
-## 14. Security Model
+## 14. Auth & Identity
 
-- Tenant isolation enforced at the data-access layer (§6) — the single most important security property of this system.
-- All external input validated with Zod at the API boundary before it reaches a service function.
-- Secrets only in environment variables; never logged, never committed, never present in client-side bundles (Clerk's secret key is the recurring example of a mistake to guard against explicitly — publishable keys are safe to expose, secret keys never are).
-- Every inbound webhook is verified (signature/shared-secret) before its payload is trusted, and persisted raw regardless of verification outcome for audit purposes.
-- Rate limiting on public endpoints (claim pages, reward-claim endpoint) to blunt automated abuse.
-- POPIA: consent capture at JOIN, STOP as a full opt-out, and a documented data export/delete path (PRD.md §12).
+Clerk, no custom auth code. Roles: `owner`, `manager`, `staff` (tenant-scoped), `super_admin` (platform-level). The claim flow's inline `<SignIn>`/`<SignUp>` (via `routing="virtual"`) is a deliberate UX choice — it keeps a prospect on the branded claim page through sign-up rather than bouncing them to a generic auth page, and should be preserved rather than "simplified" to separate pages.
 
 ---
 
-## 15. Observability & Reliability
+## 15. Security Model
 
-- **`/api/health`** — fast liveness check (process up, DB reachable).
-- **`/api/v1/selftest`** — deeper structured check of every external dependency (database, Clerk keys present, Evolution API reachable, PayFast credentials present, cron secret configured, app URL configured) returning a pass/fail per dependency — this is what gets checked immediately after every deploy, against the live URL, not localhost.
-- **`webhook_events`** table is the audit trail for every inbound event from any external system.
-- **`automation_runs`** table is the audit trail and idempotency guard for every automation execution.
-- **Graceful degradation is a hard requirement**, not a nice-to-have: a missing `DATABASE_URL`, an unset PayFast credential, or a disconnected tenant's WhatsApp must never crash a build, a page render, or a cron run — every integration client returns a typed failure result instead of throwing.
+**Confirmed strengths:** consistent tenant scoping in every query reviewed; Zod validation at API boundaries; secrets read inside function bodies (graceful degradation pattern, confirmed repeatedly); Vercel Blob uploads validated by MIME type before storage.
+
+**Confirmed gaps — must-fix before any public/paid traffic (see PRD.md §3.2 for the full risk framing):**
+1. Evolution webhook signature/shared-secret verification.
+2. Rate limiting on public endpoints (`invite-requests`, Hub join, geo-claim, claim page).
+3. POPIA-style consent capture at JOIN and a data export/delete path.
+4. Transactional or optimistic-locking safety for ordinary point/balance mutations, not only reward claims.
+5. Slug collision handling on tenant creation (two restaurants with the same name currently produce colliding or unhandled slugs).
 
 ---
 
-## 16. Testing Strategy
+## 16. Observability & Reliability
 
-| Layer | Tool | What it covers |
+**`/api/v1/selftest`** is real, built, and non-destructive — it is the concrete deploy gate this project already has, and this plan adopts it as the authoritative design rather than re-specifying an abstract one. Seven checks, each returning `pass`/`warn`/`fail`:
+
+1. **config** — required env vars present
+2. **auth** — Clerk keys present
+3. **database** — connects and can count `tenants`
+4. **whatsapp** — Evolution reachable (tolerant of free-tier cold sleep → `warn`, not `fail`)
+5. **loyalty** — earn-calculation sanity check + table read counts
+6. **campaign** — all three presets valid + a real audience/ROI read against an existing tenant, if any
+7. **claim** — haversine sanity check against a known ~500m pair + table read counts
+
+Secured with `SELFTEST_SECRET` (falls back to `CRON_SECRET`). Safe to run repeatedly against production as a go/no-go gate after every deploy or config change.
+
+`webhook_events` captures every raw inbound Evolution and PayFast payload with a processed/error status, viewable in Super Admin — the debugging surface for "why didn't this message/payment do what it should have."
+
+---
+
+## 17. Testing Strategy
+
+Unchanged recommendation from v1 — **not yet built** in the code reviewed, and worth flagging as a real gap rather than assuming it exists because so much else does:
+
+| Layer | Tool | Covers |
 |---|---|---|
-| Unit | Vitest | Service functions in `modules/*/service.ts` — especially condition evaluators and the automation engine's rule matching |
-| Integration | Vitest + test DB | Route Handlers, webhook signature verification, PayFast IPN validation logic |
-| AI evals | Manual + scripted prompts | Weekly insight generator: verify it never fabricates a number not present in its input |
-| E2E | Playwright, **against the deployed production URL**, not just localhost | Full owner journey (claim → connect WhatsApp → dashboard) and full customer journey (JOIN → BALANCE → REDEEM) |
+| Unit | Vitest | Service functions — especially the booking-detail extraction logic, condition/status classification, PayFast signature generation |
+| Integration | Vitest + test DB | Route handlers, webhook signature verification (once built), IPN validation |
+| E2E | Playwright, against the **deployed URL** | Full owner journey, full guest journey (JOIN → book → cancel/reschedule → REDEEM), Restaurant Hub join |
 
 ---
 
-## 17. Deployment Topology
+## 18. Deployment Topology
 
-| Component | Where | Cost at MVP scale |
+| Component | Where | Notes |
 |---|---|---|
-| Next.js app | Vercel | Free tier |
-| Database | Neon | Free tier |
-| Auth | Clerk | Free up to 10k MAU |
-| WhatsApp gateway | Evolution API on Render | Free tier + GitHub Actions keep-warm ping |
-| Payments | PayFast | Transaction fees only, no platform fee |
+| Next.js app | Vercel | Free tier viable at pilot scale |
+| Database + pgvector | Neon | Free tier; monitor vector index performance as `knowledge_chunks` grows |
+| Auth | Clerk | Free to 10k MAU |
+| WhatsApp — tenant instances | Evolution API on Render | One instance per tenant |
+| WhatsApp — platform instance | Evolution API on Render (separate) | Invites + broadcasts only |
+| AI | OpenAI via Vercel AI SDK | **Usage-based cost** — the one line item that isn't free-tier-flat; needs per-tenant budgeting before scale |
+| Payments | PayFast | Transaction fees only |
 | File storage | Vercel Blob | Free tier |
-| Cron (frequent) | GitHub Actions | Free |
-| Cron (infrequent) | Vercel Cron | Free tier |
-| CI | GitHub Actions | Free |
-
-Every layer is free-tier-viable through the first 10–20 tenants, consistent with PRD.md §10's cost discipline requirement. Paid tiers are adopted only once usage data justifies them.
+| Cron | GitHub Actions | Free |
 
 ---
 
-## 18. Environment Variables Reference
+## 19. Environment Variables Reference
 
 | Variable | Purpose |
 |---|---|
 | `DATABASE_URL` | Neon Postgres connection string |
-| `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` | Clerk public key |
-| `CLERK_SECRET_KEY` | Clerk secret key — server only, never exposed client-side |
-| `EVOLUTION_API_URL` | Base URL of the self-hosted Evolution API instance |
-| `EVOLUTION_GLOBAL_API_KEY` | Lifecycle-only credential — never used for sending messages |
-| `PAYFAST_MERCHANT_ID` / `PAYFAST_MERCHANT_KEY` / `PAYFAST_PASSPHRASE` | PayFast credentials |
-| `PAYFAST_MODE` | `sandbox` or `production` |
-| `NEXT_PUBLIC_APP_URL` | Canonical app URL — used to build claim links and geo-claim links |
-| `CRON_SECRET` | Shared secret required by all `/api/cron/*` endpoints |
-| `BLOB_READ_WRITE_TOKEN` | Vercel Blob storage token |
-| `AI_PROVIDER_API_KEY` | Model provider key for the Vercel AI SDK (provider-agnostic — swappable) |
+| `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` / `CLERK_SECRET_KEY` | Clerk |
+| `EVOLUTION_API_URL` / `EVOLUTION_GLOBAL_API_KEY` | Tenant instance lifecycle |
+| `EVOLUTION_WEBHOOK_SECRET` | **Referenced but not yet enforced** — must be checked in the inbound webhook |
+| `PLATFORM_INSTANCE_NAME` / `PLATFORM_INSTANCE_TOKEN` / `PLATFORM_PHONE` | Dedicated platform WhatsApp sender for invites/broadcasts |
+| `OPENAI_API_KEY` | Concierge completions + embeddings |
+| `PAYFAST_MERCHANT_ID` / `PAYFAST_MERCHANT_KEY` / `PAYFAST_PASSPHRASE` / `PAYFAST_MODE` | PayFast |
+| `PAYFAST_ENFORCE_IP` | `true` to hard-enforce the source-IP check once ranges are reverified |
+| `NEXT_PUBLIC_APP_URL` | Canonical app URL — claim links, geo-claim links, PayFast return URLs |
+| `CRON_SECRET` | Shared secret for `/api/cron/*` |
+| `SELFTEST_SECRET` | Falls back to `CRON_SECRET` if unset |
+| `BLOB_READ_WRITE_TOKEN` | Vercel Blob |
 
-Full setup checklist with where to obtain each value: see execution-plan.md, Phase 0.
+Full gather-and-verify checklist: execution-plan.md, Track A.

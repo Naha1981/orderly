@@ -5,6 +5,7 @@ import { INDUSTRIES } from '@/shared/types'
 import { hashPassword } from '@/lib/security/password'
 import { createSession, setSessionCookie } from '@/lib/auth/session'
 import { emit } from '@/lib/events/bus'
+import { generateUniqueSlug } from '@/modules/tenants/service'
 
 export async function POST(req: NextRequest) {
   try {
@@ -24,9 +25,13 @@ export async function POST(req: NextRequest) {
     if (existing) return NextResponse.json({ error: 'Email already registered' }, { status: 400 })
 
     const industryConfig = INDUSTRIES.find((i) => i.id === (industry || 'restaurant')) ?? INDUSTRIES[0]
+    // Generate a collision-free hub slug from the restaurant name so two
+    // prospects with similar names don't produce the same Restaurant Hub URL.
+    const slug = await generateUniqueSlug(restaurantName, db)
     const tenant = await db.tenant.create({
       data: {
         name: restaurantName,
+        slug,
         industry: industry || 'restaurant',
         brandingColor: industryConfig.color,
         plan: 'starter',

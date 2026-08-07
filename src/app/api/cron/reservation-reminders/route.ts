@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { sendMessage } from '@/modules/messaging/service'
 import { getReservationDateTime, formatDate } from '@/modules/bookings/service'
+import { isWithinQuietHours } from '@/shared/utils/time'
 
 export async function POST(req: NextRequest) {
   const secret = process.env.CRON_SECRET
@@ -14,13 +15,12 @@ export async function POST(req: NextRequest) {
   }
   if (!db) return NextResponse.json({ error: 'db unavailable' }, { status: 503 })
 
-  const now = new Date()
-  // Quiet hours: never text before 7am or after 8pm
-  const hour = now.getHours()
-  if (hour < 7 || hour > 20) {
+  // Quiet hours: never text before 7am or after 8pm Johannesburg time.
+  if (isWithinQuietHours()) {
     return NextResponse.json({ ok: true, skipped: 'quiet_hours', sent: 0 })
   }
 
+  const now = new Date()
   const todayIso = now.toISOString().slice(0, 10)
   const plusTwoIso = new Date(now.getTime() + 2 * 24 * 3600 * 1000).toISOString().slice(0, 10)
 

@@ -2,6 +2,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { sendMessage } from '@/modules/messaging/service'
+import { isWithinQuietHours } from '@/shared/utils/time'
 
 export async function POST(req: NextRequest) {
   const secret = process.env.CRON_SECRET
@@ -12,6 +13,11 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
   }
   if (!db) return NextResponse.json({ error: 'db unavailable' }, { status: 503 })
+
+  // Quiet hours: no review requests before 7am or after 8pm Johannesburg time.
+  if (isWithinQuietHours()) {
+    return NextResponse.json({ ok: true, skipped: 'quiet_hours', sent: 0 })
+  }
 
   const now = new Date()
   const twoHoursAgo = new Date(now.getTime() - 2 * 3_600_000)

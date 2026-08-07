@@ -604,3 +604,137 @@ Known limitations:
 - Rapid-fire API requests (>3 concurrent) can overwhelm Neon's free-tier connection pool — need pauses between heavy operations
 - Clerk not active in sandbox (keys are configured for production deployment)
 - Evolution API credentials pending (WhatsApp sends are simulated)
+
+---
+Task ID: SECURITY-HARDENING
+Agent: security-hardening
+Task: Evolution webhook verification, rate limiting, slug collision handling
+
+Work Log:
+- Read docs/STATUS.md §3 (named gaps: Evolution webhook signature verification, rate limiting, slug collision handling) and docs/CLAUDE.md rules 5 (webhook verify + persist raw payload) and 11 (/api/health + /api/v1/selftest deploy gate).
+- Reviewed existing code: webhooks/evolution/route.ts (called verifyWebhookSignature but processed regardless), evolution/client.ts (verifyWebhookSignature existed but read WEBHOOK_SECRET at module scope — Rule 3 violation), tenants/service.ts (createTenantWithOwner did not set slug at all), admin/prospects/claim/route.ts (no slug), seed/route.ts (hardcoded slug 'braaihouse').
+- Created src/lib/security/rate-limit.ts: in-memory rate limiter using a Map<string, {count, resetAt}> with TTL buckets. Exports `rateLimit(key, limit, windowMs) -> { allowed, retryInMs }`, `getClientIp(req)` (x-forwarded-for first IP → x-real-ip → 'unknown'), and `HOUR_MS`. Includes a 1-minute periodic sweep + opportunistic prune past 10k entries to bound memory. Tradeoff noted in file header: per-instance limits under multi-instance deploys — revisit (Upstash Redis) before broad rollout.
+- Refactored evolution/client.ts: removed module-scope `WEBHOOK_SECRET` constant (Rule 3 fix); verifyWebhookSignature now reads process.env.EVOLUTION_WEBHOOK_SECRET + process.env.EVOLUTION_GLOBAL_API_KEY inside the function body. Added exported `webhookSecretConfigured()` so route handlers can distinguish "secret unset (dev mode, process normally)" from "secret set + signature matched".
+- Edited src/app/api/webhooks/evolution/route.ts: persists the raw payload FIRST (always, for audit), then checks `enforced && !verified`. If the secret is configured and the signature does not match, logs a structured warning (webhookEventId, tenantId, instanceName, eventType, hasSignature) and returns 200 WITHOUT dispatching the router. Returns 200 (not 401/403) so an attacker cannot distinguish a rejected payload from an accepted one. Dev mode (secret unset) processes normally.
+- Added `slugify(baseName)` + `generateUniqueSlug(baseName, database: PrismaClient)` to tenants/service.ts. Slugify: lowercase → strip non-alphanumeric (keep space + hyphen) → collapse whitespace/underscores/hyphens to single hyphen → trim leading/trailing hyphens → fall back to 'tenant' if empty. generateUniqueSlug: probe tenants.slug column, append -2, -3, ... up to 1000, then a timestamp-shard fallback. TOCTOU race noted in a doc comment (the @unique DB constraint is the real guard).
+- Wired generateUniqueSlug into createTenantWithOwner (tenants/service.ts) — the tenant row now gets a slug derived from input.restaurantName.
+- Wired generateUniqueSlug into the admin claim flow (src/app/api/v1/admin/prospects/claim/route.ts) — the tenant created on prospect claim now gets a collision-free slug from restaurantName.
+- Wired generateUniqueSlug into the seed route (src/app/api/seed/route.ts) — replaced hardcoded 'braaihouse' with `await generateUniqueSlug('The Braai House', db)`; precomputed once so the create branch and the re-run backfill branch agree; report message now interpolates the actual slug.
+- Applied rate limiting to the four public endpoints, each with a 429 + Retry-After header on exhaustion:
+  - /api/v1/invite-requests: 5 req/IP/hour (prospect-intake form — only attack vector is pipeline pollution)
+  - /api/v1/hub/join: 10 req/IP/hour (creates customers + triggers paid WhatsApp sends)
+  - /api/v1/loyalty/claim: 20 req/IP/hour (GPS-gated redemption code issuance)
+  - /api/v1/admin/prospects/validate-claim: 20 req/IP/hour (token validation — defence-in-depth against token enumeration)
+- Verified: `npx tsc --noEmit` reports zero errors in any modified file (pre-existing errors in unrelated files unchanged); `npx eslint` on all 10 touched files passes with zero warnings/errors.
+
+Stage Summary:
+- Evolution webhook verification ENFORCED: when EVOLUTION_WEBHOOK_SECRET is set, an inbound with a non-matching apikey header is persisted for audit but not processed, and the route returns 200 to avoid leaking that the secret was wrong. Dev mode (secret unset) still processes normally.
+- Rule 3 compliance restored: EVOLUTION_WEBHOOK_SECRET and EVOLUTION_GLOBAL_API_KEY are now read inside function bodies, not at module load. A missing secret degrades the one verification call gracefully; the build never depends on it.
+- Rate limiting live on four public endpoints via a single reusable in-memory limiter (src/lib/security/rate-limit.ts). Limits are per-IP-per-endpoint with independent buckets (keyed `${endpointTag}:${ip}`). 429 responses include Retry-After in seconds.
+- Slug collisions eliminated: createTenantWithOwner, the admin claim flow, and the seed route all generate unique hub slugs via generateUniqueSlug(s) — two prospects named "The Braai House" now produce `the-braai-house` and `the-braai-house-2` instead of colliding on the @unique column.
+- No new files except rate-limit.ts (per task constraints). No tests written (per task constraints). STATUS.md §3 still lists these three gaps as open — they should be moved to §2 in a follow-up commit that also re-runs /api/v1/selftest on the deployed URL.
+
+---
+Task ID: BUILD-GAPS
+Agent: build-gaps
+Task: Recovery-ladder cron, status-recalculation cron, timezone pin for Africa/Johannesburg
+
+Work Log:
+- Read STATUS.md (§3 gaps: recovery-ladder cron, status-recalc cron, timezone pin), automation/engine.ts (idempotency pattern via automation_runs.idempotencyKey unique constraint + P2002 race handling), loyalty/service.ts (adjustPoints signature + status values: active | at_risk | dormant | vip | opted_out), and orchestrator/route.ts (CRON_SECRET pattern: Bearer header, raw header, or ?secret= query).
+- Read prisma/schema.prisma to confirm AutomationRun.ruleId is required + FK-constrained (so we can't log a run without a real AutomationRule), Customer has indexes on [tenantId, status] and [tenantId, lastVisitAt], and Customer.lastVisitAt is nullable.
+- Read automation/rules.seed.ts to discover the seeded recovery rule names (recovery.30d_nudge, recovery.45d_escalation, recovery.60d_manager_alert) — used these to look up ruleIds for the recovery-ladder's automation_runs FK without having to create synthetic system rules.
+- Read existing cron endpoints (reservation-reminders, review-requests, daily-brief) to capture the exact CRON_SECRET verification pattern and the existing quiet-hours checks they each used.
+
+- Created src/shared/utils/time.ts:
+  - TIMEZONE = 'Africa/Johannesburg' constant.
+  - nowInJoburg() — returns new Date() (JS Dates are UTC internally; helper exists for symmetry/greppability).
+  - isWithinQuietHours() — true when current SAST hour < 7 OR > 20 (i.e. outside 7am–8pm send window). Uses Intl.DateTimeFormat with timeZone option, no moment-timezone dependency.
+  - formatDateJoburg(date) — "YYYY-MM-DD HH:MM" in SAST via Intl formatToParts.
+  - todayInJoburg() — "YYYY-MM-DD" in SAST, used for daily-scoped idempotency keys.
+  - parseJoburgDate(iso) — midnight SAST as a UTC instant (SAST = UTC+2, no DST, so subtracts 2h from Date.UTC). Validates YYYY-MM-DD via regex, throws on bad input.
+  - Internal getJoburgHour() normalises the "24" midnight quirk some Intl engines emit.
+- Exported * from './time' in src/shared/utils/index.ts so callers can `import { isWithinQuietHours } from '@/shared/utils'` or `from '@/shared/utils/time'`.
+
+- Created src/app/api/cron/recovery-ladder/route.ts:
+  - Secured with CRON_SECRET (Bearer / raw / ?secret= patterns).
+  - Quiet-hours gate via isWithinQuietHours() — returns { skipped: 'quiet_hours' } outside 7am–8pm SAST.
+  - Iterates tenants with planStatus in (trial, active); for each tenant fetches non-opted-out customers with non-null lastVisitAt.
+  - Tier classifier: 30–44d + at_risk → tier 1; 45–59d + (at_risk|dormant) → tier 2; 60+d + any non-opted-out → tier 3.
+  - Tier 1: "we miss you" WhatsApp + 30 bonus points via sendMessage() + adjustPoints().
+  - Tier 2: stronger offer WhatsApp + 50 bonus points.
+  - Tier 3: manager alert to owner (tenant.whatsappPhone when whatsappStatus='connected'; otherwise logged to messages table with to='owner' so the dashboard still surfaces it, mirroring daily-brief's pattern).
+  - Idempotency: checks automation_runs for idempotencyKey `recovery-{customerId}-tier{N}-{YYYY-MM-DD-Joburg}` before sending; logs the run after. RuleId is looked up from the tenant's seeded recovery rule (recovery.30d_nudge / .45d_escalation / .60d_manager_alert). If the tenant hasn't been seeded, the run still executes (sendMessage has its own per-message idempotency on the messages table externalId column) but isn't logged to automation_runs — degraded mode, not a correctness issue. P2002 unique-constraint races are swallowed (idempotency held).
+  - Per-action error isolation: a tier-1/2 message-send failure logs a failed run and continues; a points-adjust failure after a successful message logs a warning but still counts as a tier send (the message is the higher-value action).
+  - Response: { ok, date, tenantsProcessed, sent, skipped, failed, summary: { [tenantId]: { tier1, tier2, tier3, skipped, failed } } }.
+  - Both GET and POST supported (Vercel cron sends GET by default; the orchestrator and other crons accept both).
+
+- Created src/app/api/cron/status-recalc/route.ts:
+  - Secured with CRON_SECRET. No quiet-hours gate (DB-only, no customer messaging).
+  - Four sequential updateMany passes per tenant, in this deliberate order:
+    1. status=active + lastVisitAt 30–59d → at_risk
+    2. status in (active, at_risk) + lastVisitAt 60+d → dormant
+    3. totalVisits >= 10 + status not in (vip, opted_out) → vip
+    4. status=dormant + lastVisitAt within last 7d → active
+  - Each pass captures r.count; tenantStats aggregated into summary and a top-level totalChanges counter.
+  - Response: { ok, date, tenantsProcessed, totalChanges, summary: { [tenantId]: { marked_at_risk, marked_dormant, marked_vip, reactivated, total } } }.
+
+- Updated src/app/api/cron/reservation-reminders/route.ts: replaced the raw `const hour = now.getHours(); if (hour < 7 || hour > 20)` block with `if (isWithinQuietHours()) { return ... skipped: 'quiet_hours' }`. Behavior preserved (same 7am–8pm window) but now timezone-aware via Intl instead of server-local time.
+
+- Updated src/app/api/cron/review-requests/route.ts: added a quiet-hours gate that wasn't there before (`if (isWithinQuietHours()) { return ... skipped: 'quiet_hours' }`). Previously review-request messages could fire any hour of day; now constrained to 7am–8pm SAST. This is a behavior change but a defensible one — review requests at 3am are a customer-experience bug.
+
+- Updated src/app/api/cron/daily-brief/route.ts: replaced the `if (hour < 6 || hour > 10)` morning-only window with `if (isWithinQuietHours())`. This widens the send window from 6am–10am SAST to 7am–8pm SAST — also a behavior change. Left an inline comment noting the previous narrower window and that a dedicated isWithinMorningWindow() helper can be added later if a morning-only brief is desired. The spec explicitly asked all three endpoints to use isWithinQuietHours() instead of getHours(), so this is per-spec.
+
+- Verified: `npx tsc --noEmit --skipLibCheck` produces zero errors in any of the new or modified files (the 10 pre-existing errors elsewhere in the codebase — billing/service.ts, messaging/service.ts, claim-flow.tsx, skills/*, examples/* — are unrelated and are already suppressed by next.config.ts's typescript.ignoreBuildErrors: true per STATUS.md §5).
+- Verified at runtime with a Node script: parseJoburgDate('2024-03-15') → 2024-03-14T22:00:00.000Z (midnight SAST = 22:00 UTC prev day); round-trip todayInJoburg(parseJoburgDate(today)) === today; getJoburgHour at UTC 05:00/18:00/19:00/04:59 returns 7/20/21/6 respectively (confirming the 7am–8pm send window edges are correct).
+- No tests written per task instruction.
+
+Stage Summary:
+- Three named STATUS.md §3 gaps closed: recovery-ladder cron, status-recalculation cron, timezone pin for Africa/Johannesburg.
+- New file: src/shared/utils/time.ts (timezone helpers using Intl.DateTimeFormat, no moment-timezone dependency).
+- New file: src/app/api/cron/recovery-ladder/route.ts (30/45/60-day ladder with per-tier idempotency, quiet-hours gate, CRON_SECRET).
+- New file: src/app/api/cron/status-recalc/route.ts (4-pass bulk status recalculation with change counts).
+- Modified: src/shared/utils/index.ts (re-exports time helpers).
+- Modified: src/app/api/cron/reservation-reminders/route.ts (now uses isWithinQuietHours() — same 7am–8pm window, timezone-aware).
+- Modified: src/app/api/cron/review-requests/route.ts (newly gated by isWithinQuietHours() — was unguarded before).
+- Modified: src/app/api/cron/daily-brief/route.ts (switched from 6am–10am morning window to shared 7am–8pm quiet-hours gate; narrower morning window can be restored via a future isWithinMorningWindow() helper if needed).
+- All three new/modified crons accept both GET and POST (Vercel cron default is GET; the orchestrator and sibling crons all support both).
+- Idempotency design note: the recovery-ladder's automation_runs rows require a ruleId (FK-constrained). We look up the tenant's seeded recovery rules by name (recovery.30d_nudge / .45d_escalation / .60d_manager_alert). Tenants that haven't been seeded still get their sends (sendMessage has its own per-message idempotency on the messages table) but won't get automation_runs rows — degraded mode, not a correctness issue. If full idempotency-on-retry is required for unseeded tenants, a future task should add a system-level "[system] recovery-ladder" AutomationRule created lazily per tenant.
+- TypeScript-clean for all new and modified files (verified via tsc --noEmit).
+
+---
+Task ID: GOVERNANCE-FINAL
+Agent: orchestrator
+Task: NahaLabs governance docs + security hardening + build gaps — final verification
+
+Work Log:
+- Read the full 1952-line NahaLabs governance package (PRD template, CLAUDE.md, Engineering Standard v5.0, ADR template, TASK_PROMPT, spec-driven methodology, execution plan, worked spec examples, file structure, architecture notes)
+- Created complete docs/ governance structure via 4 parallel subagents:
+  - docs/PRD.md (552 lines, 19 sections) — Orderly project requirements using the NahaLabs PRD template
+  - docs/CLAUDE.md (413 lines, 14 sections) — AI agent system prompt with all 12 non-negotiable rules adapted to Orderly
+  - docs/NAHALABS_ENGINEERING_STANDARD.md (430 lines, 14 sections) — Engineering standard adapted to actual stack (Prisma, session JWT, Nvidia AI)
+  - docs/adr/ADR-001-prisma-instead-of-drizzle.md — ORM deviation ADR
+  - docs/adr/ADR-002-session-jwt-instead-of-clerk.md — Auth deviation ADR
+  - docs/adr/ADR-003-nvidia-api-instead-of-vercel-ai-sdk.md — AI provider deviation ADR
+  - docs/TASK_PROMPT.md — Reusable per-session task prompt
+  - docs/specs/00-spec-driven-methodology.md — Five-step loop + spec template
+  - docs/specs/001-loyalty-core.md — Worked spec example (loyalty pipeline)
+  - docs/specs/002-ai-concierge-and-booking-engine.md — Worked spec example (AI concierge)
+  - docs/STATUS.md — Current build status snapshot (updated with closed gaps)
+- Security hardening via parallel subagent:
+  - Evolution webhook signature verification — now enforces EVOLUTION_WEBHOOK_SECRET before processing
+  - Rate limiting on 4 public endpoints (invite-requests, hub/join, loyalty/claim, claim/validate) via in-memory limiter
+  - Slug collision handling — generateUniqueSlug() appends -2, -3, etc.
+- Build gaps via parallel subagent:
+  - Recovery-ladder cron (/api/cron/recovery-ladder) — 30/45/60-day escalation with idempotency + quiet hours
+  - Status-recalculation cron (/api/cron/status-recalc) — daily active→at_risk→dormant→vip transitions
+  - Timezone pin (src/shared/utils/time.ts) — Africa/Johannesburg helpers, all cron endpoints updated
+- Updated docs/STATUS.md — 6 of 10 gaps now marked as CLOSED
+- Production build: next build + standalone server — passes
+- Lint: 0 errors, 7 warnings (all unused eslint-disable directives)
+- Comprehensive curl verification: health, selftest, login, stats, status-recalc cron, rate limit, hub — ALL PASSED
+
+Stage Summary:
+- Complete NahaLabs governance structure in docs/ — 11 files (PRD, CLAUDE.md, Engineering Standard, 3 ADRs, TASK_PROMPT, 3 specs, STATUS)
+- 6 security/feature gaps closed: webhook verification, rate limiting, slug collision, recovery-ladder cron, status-recalc cron, timezone pin
+- 4 gaps remain: POPIA consent capture, AI budget guard, VIP-upgrade notification, proactive reactivation nudge
+- System verified: Neon Postgres (pass), Nvidia AI (pass), all APIs functional, server stable

@@ -1,196 +1,174 @@
-# Orderly — Production-Ready File Structure
+# Orderly — Production File Structure
 
-Companion to plan.md §5 (architecture overview). This is the full, annotated repository layout for the MVP scope defined in PRD.md and execution-plan.md. Folders marked **(P2)** are placeholders created empty in Phase 1 and populated only when their phase in the deferred roadmap begins — this keeps the module boundary visible from day one without building ahead of scope.
+**Version:** 2.0 — reflects the module layout of the system as actually built (plan.md §5), not the narrower loyalty-only layout from v1.
+
+Status markers show what's confirmed built (✅), partially built (◐), or roadmap (○) per PRD.md §7 / execution-plan.md §2 — so this doubles as a map of what to verify (Track A) versus what to create (Track C).
 
 ```
 orderly/
 │
-├── PRD.md                          # Product requirements (this package)
-├── plan.md                         # Architecture & tech decisions (this package)
-├── execution-plan.md               # Build phases (this package)
-├── file-structure.md               # This document
-├── README.md                       # Repo entry point: what this is, how to run it
-│
-├── specs/                          # Spec-driven methodology + per-feature specs
+├── PRD.md · plan.md · execution-plan.md · file-structure.md · README.md
+├── specs/
 │   ├── 00-spec-driven-methodology.md
-│   ├── 001-core-loyalty-messaging.md   # Worked example spec (Phases 2–3)
-│   └── ...                         # One numbered spec per feature added after MVP
+│   ├── 001-pipeline-4-loyalty-core.md
+│   └── 002-ai-concierge-and-booking-engine.md
 │
-├── drizzle/                        # Generated migration metadata (drizzle-kit output)
+├── drizzle/                          # drizzle-kit push output
 ├── drizzle.config.ts
 │
-├── .github/
-│   └── workflows/
-│       ├── ci.yml                  # typecheck + build (no env vars) + lint, on every push
-│       ├── cron-frequent.yml       # pings /api/cron/orchestrator every 10 min (recovery, status)
-│       ├── cron-daily.yml          # daily cadence dispatch
-│       ├── cron-weekly.yml         # weekly insight generation dispatch
-│       └── evolution-keep-warm.yml # pings the Render Evolution instance to prevent cold sleep
+├── .github/workflows/
+│   ├── ci.yml                         # typecheck + build (no env vars) + lint
+│   ├── reservation-reminders.yml      # ✅ every 30 min
+│   ├── review-requests.yml            # ✅ every 30 min
+│   ├── daily-brief.yml                # ✅ daily
+│   ├── status-recalc.yml              # ○ RECOMMENDED (Track C2)
+│   ├── recovery-ladder.yml            # ○ RECOMMENDED (Track C1)
+│   └── evolution-keep-warm.yml        # keeps both Evolution instances awake
 │
-├── tests/
-│   ├── unit/                       # Vitest — service-layer logic
-│   │   ├── loyalty.service.test.ts
-│   │   ├── automation.conditions.test.ts
-│   │   └── payfast.signature.test.ts
-│   ├── integration/                 # Vitest — route handlers, webhook verification
-│   │   ├── webhooks.evolution.test.ts
-│   │   └── webhooks.payfast.test.ts
-│   └── e2e/                         # Playwright — run against the deployed URL
-│       ├── owner-journey.spec.ts
-│       └── customer-journey.spec.ts
+├── tests/                             # ○ ROADMAP — plan.md §17
+│   ├── unit/  integration/  e2e/
 │
-├── drizzle.config.ts
-├── next.config.ts
-├── tailwind.config.ts
-├── tsconfig.json
-├── package.json
-├── .env.example
-├── .gitignore
+├── package.json · tsconfig.json · next.config.ts · tailwind.config.ts
+├── .env.example · .gitignore
 │
 └── src/
     │
-    ├── middleware.ts               # Clerk auth gate; public routes explicitly listed
+    ├── middleware.ts                  # Clerk auth gate; public routes listed explicitly
     │
-    ├── app/                        # Next.js App Router
+    ├── app/
+    │   ├── (marketing)/page.tsx        # ✅ landing page
     │   │
-    │   ├── (marketing)/            # Public landing page — no sidebar, no auth
-    │   │   ├── layout.tsx
-    │   │   └── page.tsx
-    │   │
-    │   ├── (app)/                  # Authenticated owner dashboard
-    │   │   ├── layout.tsx          # Sidebar nav: Dashboard, Customers, Campaigns, Insights, Settings
-    │   │   ├── dashboard/page.tsx
-    │   │   ├── customers/page.tsx
-    │   │   ├── campaigns/
-    │   │   │   ├── page.tsx        # Campaign history + the 3 owner buttons
-    │   │   │   └── new/page.tsx    # 3-step builder (goal → message → audience/ROI/send)
-    │   │   ├── insights/page.tsx   # Weekly plain-English report
-    │   │   ├── settings/page.tsx   # Profile, WhatsApp connection, billing
-    │   │   ├── onboarding/page.tsx
-    │   │   ├── reservations/       # (P2 — placeholder only)
-    │   │   ├── reviews/            # (P2 — placeholder only)
-    │   │   └── operations/         # (P2 — placeholder only)
-    │   │
-    │   ├── (super-admin)/          # Internal, super_admin role only
-    │   │   ├── layout.tsx
-    │   │   ├── page.tsx
-    │   │   ├── prospects/page.tsx
-    │   │   ├── broadcasts/page.tsx
-    │   │   ├── webhooks/page.tsx   # Cross-tenant webhook_events viewer
-    │   │   └── tenants/page.tsx
-    │   │
-    │   ├── login/[[...rest]]/page.tsx
+    │   ├── dashboard/page.tsx          # ✅ today's brief, quick actions, highlights
+    │   ├── campaigns/page.tsx          # ✅ history + 3-preset builder
+    │   ├── setup/page.tsx              # ✅ capacity, avg spend, hours, rewards catalogue
+    │   ├── menu/page.tsx               # ✅ menu manager (owner-facing CRUD)
+    │   ├── billing/page.tsx            # ✅ plan cards, PayFast checkout
+    │   ├── settings/page.tsx           # ✅ tabs: profile, WhatsApp connect, concierge, quick answers
+    │   ├── reservations/page.tsx       # ◐ dedicated list/management UI beyond dashboard highlights
+    │   ├── reviews/page.tsx            # ○ reviews inbox UI
+    │   ├── operations/page.tsx         # ○ checklists/inventory UI
+    │   ├── login/[[...rest]]/page.tsx  # direct dashboard access for returning users
     │   ├── signup/[[...rest]]/page.tsx
-    │   ├── claim/[token]/page.tsx  # Invite-only onboarding, branded per industry
-    │   ├── geo-claim/[eventId]/page.tsx   # GPS-gated reward claim
-    │   ├── r/[slug]/                # (P2 — Smart Page, deferred)
+    │   │
+    │   ├── admin/                      # ✅ Super Admin, all routes below
+    │   │   ├── layout.tsx              #   requireSuperAdmin() guard
+    │   │   ├── page.tsx                #   overview counts
+    │   │   ├── tenants/page.tsx
+    │   │   ├── prospects/page.tsx      #   CSV upload + per-row Invite button
+    │   │   ├── broadcast/page.tsx
+    │   │   └── webhooks/page.tsx       #   raw payload viewer, filter by source
+    │   │
+    │   ├── claim/[token]/
+    │   │   ├── page.tsx                # ✅ branded, embeds Clerk SignIn/SignUp inline (routing="virtual")
+    │   │   └── actions.ts              #   claimProspectAction — prospect → tenant + owner profile
+    │   ├── geo-claim/[token]/page.tsx  # ✅ GPS-verified reward claim, cashier QR + code
+    │   ├── r/[slug]/
+    │   │   ├── page.tsx                # ✅ Restaurant Hub — action grid, web-based Join Rewards
+    │   │   └── menu/page.tsx           # ○ GAP (Track C5) — render menuItems; concierge tool already reads this data
     │   │
     │   └── api/
-    │       ├── health/route.ts
     │       ├── v1/
-    │       │   ├── selftest/route.ts
-    │       │   ├── customers/
-    │       │   │   ├── route.ts
-    │       │   │   └── [id]/route.ts
-    │       │   ├── loyalty/
-    │       │   │   ├── redeem/route.ts
-    │       │   │   └── claim/route.ts        # public — GPS verification + claim
-    │       │   ├── campaigns/
-    │       │   │   ├── route.ts
-    │       │   │   ├── [id]/send/route.ts
-    │       │   │   ├── audience/route.ts
-    │       │   │   └── roi/route.ts
-    │       │   ├── whatsapp/
-    │       │   │   ├── connect/route.ts
-    │       │   │   ├── status/route.ts
-    │       │   │   └── disconnect/route.ts
-    │       │   ├── billing/route.ts
-    │       │   ├── payments/checkout/route.ts
-    │       │   ├── intelligence/weekly/route.ts
+    │       │   ├── selftest/route.ts             # ✅ 7-check non-destructive deploy gate
+    │       │   ├── invite-requests/route.ts       # ✅ public — homepage "request an invite" → prospects
+    │       │   ├── hub/join/route.ts               # ✅ public — Restaurant Hub web-join
+    │       │   ├── geo-claim/[token]/claim/route.ts # ✅ public — GPS claim
+    │       │   ├── rewards/route.ts · [id]/route.ts # ✅ rewards catalogue CRUD
+    │       │   ├── rewards/verify/[token]/route.ts  # ✅ staff cashier verification
+    │       │   ├── reservations/[id]/complete/route.ts # ✅ earn-on-visit trigger
+    │       │   ├── campaigns/route.ts · preview/route.ts · [id]/send/route.ts # ✅
+    │       │   ├── menu/route.ts · [id]/route.ts    # ✅ menu CRUD
+    │       │   ├── knowledge/route.ts · ingest/route.ts · [id]/route.ts · [id]/reingest/route.ts # ✅
+    │       │   ├── concierge/test/route.ts          # ✅ grounded test box backend
+    │       │   ├── settings/restaurant/route.ts     # ✅ capacity/avg-spend/hours
+    │       │   ├── settings/knowledge/route.ts       # ✅ Quick Answers save
+    │       │   ├── settings/logo/route.ts             # ✅ Vercel Blob upload
+    │       │   ├── whatsapp/connect/route.ts · status/route.ts # ✅
+    │       │   ├── billing/checkout/route.ts          # ✅ PayFast signed-fields builder
+    │       │   ├── brief/today/route.ts                # ✅ dashboard daily-brief API
     │       │   └── admin/
-    │       │       ├── prospects/upload/route.ts
-    │       │       ├── prospects/send-invites/route.ts
-    │       │       └── broadcast/route.ts
+    │       │       ├── tenants/route.ts                # ✅
+    │       │       ├── prospects/route.ts · upload/route.ts · [id]/invite/route.ts # ✅
+    │       │       ├── broadcast/route.ts               # ✅
+    │       │       └── webhooks/route.ts                 # ✅
+    │       │
     │       ├── webhooks/
-    │       │   ├── evolution/route.ts   # public, verified, persists raw event first
-    │       │   └── payfast/route.ts     # public, verified, 4-check IPN
+    │       │   ├── evolution/route.ts   # ✅ inbound WhatsApp — ⚠ signature verification GAP (Track B)
+    │       │   └── payfast/route.ts     # ✅ IPN — all 4 checks implemented
+    │       │
     │       └── cron/
-    │           └── orchestrator/route.ts   # secured with CRON_SECRET
+    │           ├── reservation-reminders/route.ts  # ✅
+    │           ├── review-requests/route.ts          # ✅
+    │           ├── daily-brief/route.ts               # ✅
+    │           ├── status-recalc/route.ts              # ○ RECOMMENDED (Track C2)
+    │           └── recovery-ladder/route.ts             # ○ RECOMMENDED (Track C1)
     │
-    ├── modules/                    # Business domains — all logic lives here, not in routes
-    │   ├── tenants/
-    │   │   ├── service.ts
-    │   │   ├── validation.ts
-    │   │   └── actions.ts          # Server Actions (onboarding, claim)
-    │   ├── customers/
-    │   │   ├── service.ts
-    │   │   └── validation.ts
-    │   ├── loyalty/
-    │   │   ├── service.ts          # join, balance, redeem, GPS claim, opt-out, ledger
-    │   │   └── validation.ts
-    │   ├── campaigns/
-    │   │   ├── service.ts          # audience resolution, ROI estimate, throttled send
-    │   │   └── validation.ts
-    │   ├── messaging/
-    │   │   ├── service.ts          # the single sendMessage() gateway
-    │   │   └── channels/
-    │   │       └── whatsapp-evolution.ts
-    │   ├── automation/
-    │   │   ├── types.ts
-    │   │   ├── conditions.ts
-    │   │   ├── actions.ts
-    │   │   ├── engine.ts
-    │   │   └── rules.seed.ts       # the ~18 MVP automation rules, as data
-    │   ├── recovery/
-    │   │   └── service.ts          # 30/45/60-day escalation ladder
-    │   ├── intelligence/
-    │   │   └── service.ts          # weekly insight generation
-    │   ├── billing/
-    │   │   └── service.ts          # PayFast checkout + IPN handling
-    │   ├── admin/
-    │   │   └── service.ts          # prospects, invites, broadcasts, cross-tenant reads
-    │   ├── reservations/            # (P2 — placeholder only)
-    │   ├── reviews/                 # (P2 — placeholder only)
-    │   └── operations/              # (P2 — placeholder only)
+    ├── modules/
+    │   ├── tenants/           service.ts · actions.ts (claim, settings)
+    │   ├── guests/             service.ts
+    │   ├── loyalty/             service.ts   # ✅ JOIN/BALANCE/STOP, earn-on-visit
+    │   ├── rewards/             service.ts   # ✅ REDEEM, GPS claim validation
+    │   ├── reservations/        service.ts   # ✅ create/cancel/reschedule/complete/checkAvailability/markNoShow
+    │   ├── bookings/             service.ts   # ✅ AI extraction, draft state machine, cancel/reschedule orchestration
+    │   ├── waitlist/              service.ts   # ✅ join, offerFreedTable, accept
+    │   ├── reviews/               service.ts   # ✅ capture + sentiment routing
+    │   ├── campaigns/             service.ts   # ✅ presets, audience, ROI, send, attribution
+    │   ├── concierge/
+    │   │   ├── tools.ts          # ✅ getMenu, getBusinessInfo, getSpecials, getLoyaltyBalance,
+    │   │   │                     #    searchKnowledge, getQuickAnswers
+    │   │   ├── service.ts        # ✅ answerWithConcierge — grounded system prompt + tool loop
+    │   │   └── router.ts         # ✅ routeInboundMessage — the ordered dispatcher (plan.md §10)
+    │   ├── knowledge/             service.ts   # ✅ ingest/reingest/delete/search (RAG)
+    │   ├── operations/
+    │   │   └── daily-brief.ts    # ✅ builder + WhatsApp formatter
+    │   │   └── checklists.ts     # ○ ROADMAP (Track C8)
+    │   ├── whatsapp/
+    │   │   └── send.ts           # ✅ sendMessageToGuest / sendMessageToOwner / sendPlatformMessage
+    │   ├── recovery/               # ○ RECOMMENDED NEW MODULE (Track C1)
+    │   └── delight/                 # ○ RECOMMENDED NEW MODULE (Track C3) — VIP, birthday, anniversary
     │
     ├── lib/
-    │   ├── db/
-    │   │   ├── index.ts             # nullable Drizzle client
-    │   │   └── schema.ts            # full MVP schema (plan.md §7)
+    │   ├── db/index.ts (nullable client) · schema.ts (full schema — assembled per Track A1)
     │   ├── integrations/
     │   │   ├── evolution/
-    │   │   │   ├── types.ts
-    │   │   │   └── client.ts        # two-key model enforced here
+    │   │   │   ├── lifecycle.ts   # ✅ Global key — createInstance/getQrCode/getConnectionState
+    │   │   │   └── client.ts       # ✅ per-tenant token — sendText
     │   │   └── payfast/
-    │   │       ├── signature.ts     # order-preserved MD5, never alphabetical
+    │   │       ├── signature.ts   # ✅ order-preserved MD5
+    │   │       ├── plans.ts        # ✅ 2 plans defined — ties to PRD.md §11 pricing decision
     │   │       └── client.ts
-    │   ├── events/
-    │   │   └── bus.ts               # domain event emitter
-    │   └── ai/
-    │       └── provider.ts          # Vercel AI SDK setup, model-agnostic
+    │   ├── webhooks/log.ts        # ✅ logWebhookEvent()
+    │   └── ai/provider.ts          # ○ RECOMMENDED — thin indirection over direct openai() calls
     │
     ├── shared/
     │   ├── constants/
-    │   │   └── industries.ts
-    │   ├── types/
     │   └── utils/
-    │       ├── tenant-context.ts    # getTenantContext() — the one source of truth per request
-    │       └── geo.ts               # haversine distance, GPS radius check
+    │       ├── tenant-context.ts   # ✅ requireTenantContext()
+    │       ├── super-admin.ts       # ✅ requireSuperAdmin()
+    │       └── geo.ts                # ○ RECOMMENDED — move haversineMeters() here from modules/rewards
     │
     └── components/
-        ├── ui/                      # shadcn/ui primitives
-        ├── dashboard/
-        ├── campaigns/
-        ├── customers/
-        ├── insights/
+        ├── ui/                       # shadcn/ui primitives
+        ├── marketing/invite-form.tsx
+        ├── hub/hub-client.tsx
+        ├── rewards/geo-claim-client.tsx
+        ├── claim/claim-client.tsx
+        ├── dashboard/  campaigns-client.tsx  menu-manager.tsx  hub-qr.tsx
         ├── settings/
-        └── super-admin/
+        │   ├── concierge-settings.tsx   # teach (URL/PDF), learned sources, test box
+        │   ├── quick-answers.tsx
+        │   ├── whatsapp-connect.tsx
+        │   ├── restaurant-setup.tsx
+        │   ├── rewards-manager.tsx
+        │   └── billing-client.tsx
+        └── admin/
+            ├── admin-nav.tsx  tenants-client.tsx  prospects-client.tsx
+            ├── broadcast-client.tsx  webhooks-client.tsx
 ```
 
 ## Notes on this structure
 
-- **No `src/services/` or `src/controllers/` folder.** Logic is organised by business domain (`modules/loyalty`, `modules/campaigns`) per plan.md §2, not by technical layer.
-- **`modules/messaging/` and `modules/automation/` are cross-cutting infrastructure**, not features — every other module depends on them, never the reverse.
-- **P2 folders are created empty with a single placeholder file** (e.g. a comment noting the deferred phase) in Phase 1, so the module boundary is visible in the codebase from the start without pulling forward any Phase 2/3 build work.
-- **`tests/` mirrors the module structure it covers**, not a 1:1 file-per-file mirror of `src/` — test what matters (service logic, webhook verification, signature checks), not UI snapshots at MVP stage.
-- **Nothing in `src/app/api/` contains business logic.** Every route handler's body is: authenticate → resolve tenant → validate → call a `modules/*/service.ts` function → return a response.
+- **Every route handler's body is: authenticate → resolve tenant (or verify super-admin, or verify webhook/cron secret) → validate → call a `modules/*` function → respond.** No exceptions found in the code reviewed — keep it that way as new routes are added.
+- **`modules/concierge/router.ts` is the single dispatch point for every inbound WhatsApp message.** It is intentionally a plain, ordered function (plan.md §10) — do not introduce a second routing mechanism elsewhere.
+- **`modules/whatsapp/send.ts` is the single outbound gateway.** No module should call the Evolution client directly for sending; only `lib/integrations/evolution/lifecycle.ts` is called directly, and only from tenant-connect and Super Admin flows.
+- **Two new modules recommended, not yet present:** `modules/recovery/` (Track C1) and `modules/delight/` (Track C3) — both are pure additions, no existing module needs to change to accommodate them.
+- **The Restaurant Hub and its menu sub-page belong together** (`r/[slug]/` and `r/[slug]/menu/`) but the menu page is the one visible gap in an otherwise complete Hub.

@@ -1,6 +1,7 @@
 // Orderly — tenant management service
 // Onboarding, claim, settings, WhatsApp connection lifecycle.
 
+import { PrismaClient } from '@prisma/client'
 import { db, err, ok, requireDb, type Result } from '@/lib/db'
 import { hashPassword } from '@/lib/security/password'
 import {
@@ -33,9 +34,14 @@ export async function createTenantWithOwner(
 
   const industryConfig = INDUSTRIES.find((i) => i.id === input.industry) ?? INDUSTRIES[0]
 
+  // Generate a unique hub slug from the restaurant name so the Restaurant Hub
+  // URL is stable and collision-free even when two tenants share a name.
+  const slug = await generateUniqueSlug(input.restaurantName, database)
+
   const tenant = await database.tenant.create({
     data: {
       name: input.restaurantName,
+      slug,
       industry: input.industry,
       brandingColor: industryConfig.color,
       address: input.address,
@@ -225,6 +231,61 @@ export async function deleteReward(tenantId: string, rewardId: string): Promise<
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Convert a restaurant name into a URL-safe hub slug.
+ *
+ * Rules:
+ *   - lowercase
+ *   - alphanumeric + hyphens only (spaces and punctuation collapse to hyphens)
+ *   - no leading/trailing/duplicate hyphens
+ *   - falls back to `'tenant'` when the name has no slug-eligible characters
+ *     (e.g. all emoji or punctuation)
+ */
+export function slugify(baseName: string): string {
+  const slug = baseName
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9\s-]/g, '')   // strip non-alphanumeric (keep space + hyphen)
+    .replace(/[\s_-]+/g, '-')        // collapse whitespace / underscores / hyphens
+    .replace(/^-+|-+$/g, '')         // trim leading/trailing hyphens
+  return slug || 'tenant'
+}
+
+/**
+ * Generate a unique hub slug for a tenant.
+ *
+ * 1. Slugifies the restaurant name (lowercase, hyphenated, alphanumeric).
+ * 2. Checks the `tenants.slug` column (which is `@unique` in the Prisma schema).
+ * 3. If taken, appends `-2`, `-3`, ... until a free slug is found.
+ *
+ * Race-condition note: there is a TOCTOU window between this check and the
+ * subsequent `tenant.create`. The `@unique` DB constraint is the real guard —
+ * a concurrent insert with the same slug will throw a Prisma unique-constraint
+ * error, which the caller should handle by retrying. This helper minimises
+ * collisions at normal request volume; it is not a serialisable transaction.
+ */
+export async function generateUniqueSlug(
+  baseName: string,
+  database: PrismaClient,
+): Promise<string> {
+  const base = slugify(baseName)
+  let slug = base
+  let suffix = 2
+  // Cap the loop to avoid an unbounded scan under adversarial input; 1000
+  // collisions on the same base slug is well past "something is wrong."
+  while (suffix < 1000) {
+    const existing = await database.tenant.findFirst({
+      where: { slug },
+      select: { id: true },
+    })
+    if (!existing) return slug
+    slug = `${base}-${suffix}`
+    suffix += 1
+  }
+  // Pathological fallback — append a timestamp shard so it's effectively unique.
+  return `${base}-${Date.now().toString(36).slice(-4)}`
+}
 
 function simulatedQr(text: string): string {
   // Generate a fake "QR" SVG placeholder for simulation mode
