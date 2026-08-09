@@ -71,7 +71,7 @@ function daysUntil(date: Date | null): number | null {
 }
 
 function asPlan(maybe: string | null | undefined): Plan | null {
-  if (maybe === 'starter' || maybe === 'growth') return maybe
+  if (maybe === 'starter' || maybe === 'growth' || maybe === 'professional' || maybe === 'premium') return maybe
   return null
 }
 

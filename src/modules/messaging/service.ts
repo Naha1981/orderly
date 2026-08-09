@@ -101,6 +101,7 @@ export async function sendMessage(
         whatsappInstanceName: true,
         whatsappInstanceToken: true,
         whatsappStatus: true,
+        whatsappPhone: true,
       },
     })
     if (!tenant) return err('TENANT_NOT_FOUND')

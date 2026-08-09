@@ -142,8 +142,8 @@ export function ClaimFlow({ token }: { token: string }) {
                   <Input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} required minLength={6} className="mt-1" />
                   <p className="text-xs text-muted-foreground mt-1">At least 6 characters.</p>
                 </div>
-                <Button type="submit" disabled={phase === 'submitting'} className="w-full bg-emerald-600 hover:bg-emerald-700">
-                  {phase === 'submitting' ? <Spinner size="sm" /> : null}
+                <Button type="submit" disabled={(phase as string) === 'submitting'} className="w-full bg-emerald-600 hover:bg-emerald-700">
+                  {(phase as string) === 'submitting' ? <Spinner size="sm" /> : null}
                   Claim & activate <ArrowRight className="h-4 w-4" />
                 </Button>
                 <p className="text-xs text-center text-muted-foreground">

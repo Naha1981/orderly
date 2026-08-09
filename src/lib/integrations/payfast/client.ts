@@ -76,7 +76,7 @@ export type CheckoutInput = {
   paymentId: string // merchant-payment-id (our internal PaymentTransaction.id)
   amount: number // ZAR
   itemName: string
-  plan: 'starter' | 'growth'
+  plan: string
   subscriptionType: number // 1=monthly, 2=quarterly, 3=yearly (we use 1)
   returnUrl: string
   cancelUrl: string

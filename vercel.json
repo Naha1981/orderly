@@ -1,0 +1,32 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/orchestrator?cadence=daily",
+      "schedule": "0 1 * * *"
+    },
+    {
+      "path": "/api/cron/status-recalc",
+      "schedule": "30 1 * * *"
+    },
+    {
+      "path": "/api/cron/recovery-ladder",
+      "schedule": "0 8 * * *"
+    },
+    {
+      "path": "/api/cron/reservation-reminders",
+      "schedule": "*/30 * * * *"
+    },
+    {
+      "path": "/api/cron/review-requests",
+      "schedule": "*/30 * * * *"
+    },
+    {
+      "path": "/api/cron/daily-brief",
+      "schedule": "0 4 * * *"
+    },
+    {
+      "path": "/api/cron/insights",
+      "schedule": "0 5 * * 1"
+    }
+  ]
+}
