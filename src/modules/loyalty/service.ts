@@ -70,6 +70,8 @@ export async function handleJoin(
       status: 'active',
       source,
       consentAt: new Date(),
+      consentVersion: '1',
+      marketingConsent: true,
       lastVisitAt: new Date(),
     },
   })
@@ -441,7 +443,7 @@ export async function adjustPoints(
   const database = requireDb()
   const customer = await database.customer.findUnique({
     where: { id: customerId },
-    select: { id: true, tenantId: true, pointsBalance: true, phone: true },
+    select: { id: true, tenantId: true, pointsBalance: true, phone: true, version: true },
   })
   if (!customer || customer.tenantId !== tenantId) return err('CUSTOMER_NOT_FOUND')
 
@@ -455,12 +457,17 @@ export async function adjustPoints(
       reference: 'manual',
     },
   })
-  const updated = await database.customer.update({
+  // Optimistic locking: only update if version hasn't changed (no concurrent mutation)
+  const updated = await database.customer.updateMany({
+    where: { id: customerId, version: customer.version },
+    data: { pointsBalance: { increment: points }, version: { increment: 1 } },
+  })
+  if (updated.count === 0) return err('CONFLICT') // concurrent mutation — caller may retry
+  const refreshed = await database.customer.findUnique({
     where: { id: customerId },
-    data: { pointsBalance: { increment: points } },
     select: { pointsBalance: true },
   })
-  return ok({ newBalance: updated.pointsBalance })
+  return ok({ newBalance: refreshed?.pointsBalance ?? 0 })
 }
 
 // ─── Helper: phone normalization (local copy to avoid circular dep) ──────────

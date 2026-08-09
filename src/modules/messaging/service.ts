@@ -106,14 +106,18 @@ export async function sendMessage(
     })
     if (!tenant) return err('TENANT_NOT_FOUND')
 
-    // 3. Check customer opted-out (POPIA: never send marketing to opted_out)
+    // 3. Check customer opted-out + marketing consent (POPIA compliance)
     if (context.customerId) {
       const customer = await database.customer.findUnique({
         where: { id: context.customerId },
-        select: { status: true },
+        select: { status: true, marketingConsent: true },
       })
       if (customer?.status === 'opted_out' && context.campaignId) {
         return ok({ messageId: null, externalId: null, status: 'skipped', error: 'customer opted_out' })
+      }
+      // POPIA: marketing campaigns require explicit marketing consent
+      if (context.campaignId && customer?.marketingConsent === false) {
+        return ok({ messageId: null, externalId: null, status: 'skipped', error: 'marketing consent not given' })
       }
     }
 
@@ -152,17 +156,28 @@ export async function sendMessage(
       tenant.whatsappStatus === 'connected'
 
     if (canSend) {
-      const r = await sendTextMessage(
-        tenant.whatsappInstanceName!,
-        tenant.whatsappInstanceToken!,
-        to,
-        content,
-      )
-      if (r.ok) {
-        externalId = r.value.id
-      } else {
+      // Retry with exponential backoff on transient failures
+      let lastError: string | undefined
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const r = await sendTextMessage(
+          tenant.whatsappInstanceName!,
+          tenant.whatsappInstanceToken!,
+          to,
+          content,
+        )
+        if (r.ok) {
+          externalId = r.value.id
+          lastError = undefined
+          break
+        }
+        lastError = r.error
+        // Don't retry permanent errors (wrong number, auth failure, etc.)
+        if (!/SEND_5|SEND_ERROR|ECONN|fetch|timeout|503|502|429/i.test(r.error || '')) break
+        if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 300 * Math.pow(2, attempt)))
+      }
+      if (lastError) {
         status = 'failed'
-        sendError = r.error
+        sendError = lastError
       }
     } else {
       // Simulation mode — log the message but don't actually send. This is

@@ -146,6 +146,9 @@ model Customer {
   lastVisitAt   DateTime?
   joinedAt      DateTime @default(now())
   consentAt     DateTime?
+  consentVersion String?
+  marketingConsent Boolean @default(true)
+  version       Int      @default(0) // optimistic locking for point mutations
   optedOutAt    DateTime?
   source        String?  // hub | qr | whatsapp | instagram | tiktok | facebook | google | manual
   birthday      DateTime?
