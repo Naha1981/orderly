@@ -103,47 +103,69 @@ export async function connectWhatsApp(
   const tenant = await database.tenant.findUnique({ where: { id: tenantId } })
   if (!tenant) return err('TENANT_NOT_FOUND')
 
-  // Create instance if not present
+  // Create instance if not present, or if the existing one doesn't exist on the API
   let instanceName = tenant.whatsappInstanceName
   if (!instanceName) {
-    if (!evolutionConfigured()) {
-      // Simulation mode — generate a fake QR + mark as connecting
-      instanceName = `tenant-${tenantId.slice(-8)}`
-      await database.tenant.update({
-        where: { id: tenantId },
-        data: {
-          whatsappInstanceName: instanceName,
-          whatsappStatus: 'connecting',
-          whatsappQrCode: `data:image/svg+xml;base64,${Buffer.from(simulatedQr('Open this app on your phone to simulate WhatsApp connection. In production, this would be a real QR code from Evolution API.')).toString('base64')}`,
-        },
-      })
-      return ok({ qrCode: tenant.whatsappQrCode, status: 'connecting', instanceName })
-    }
-    const r = await createInstance(instanceName ?? `tenant-${tenantId.slice(-8)}`)
-    if (!r.ok) return err(r.error)
     instanceName = `tenant-${tenantId.slice(-8)}`
   }
 
-  await database.tenant.update({
-    where: { id: tenantId },
-    data: { whatsappStatus: 'connecting' },
-  })
+  if (evolutionConfigured()) {
+    // Try to connect first — if 404, the instance doesn't exist yet, so create it
+    let connectResult = await connectInstance(instanceName)
+    if (!connectResult.ok) {
+      // Instance doesn't exist — create it
+      const createResult = await createInstance(instanceName)
+      if (!createResult.ok) return err(createResult.error)
+      // Extract the token from the create response
+      const createToken = (createResult.value as any)?.hash ?? null
+      if (createToken) {
+        await database.tenant.update({
+          where: { id: tenantId },
+          data: {
+            whatsappInstanceName: instanceName,
+            whatsappInstanceToken: createToken,
+            whatsappStatus: 'connecting',
+          },
+        })
+      }
+      // Now try to connect again to get the QR
+      connectResult = await connectInstance(instanceName)
+    }
 
-  // Connect to get QR
-  const r = await connectInstance(instanceName!)
-  if (!r.ok) return err(r.error)
-  const qrCode = (r.value as any)?.qrcode?.base64 ?? (r.value as any)?.qrcode ?? null
-  const token = (r.value as any)?.hash ?? (r.value as any)?.instance?.hash ?? tenant.whatsappInstanceToken ?? null
+    await database.tenant.update({
+      where: { id: tenantId },
+      data: { whatsappStatus: 'connecting' },
+    })
 
-  await database.tenant.update({
-    where: { id: tenantId },
-    data: {
-      whatsappStatus: 'connecting',
-      whatsappQrCode: qrCode,
-      whatsappInstanceToken: token,
-    },
-  })
-  return ok({ qrCode, status: 'connecting', instanceName: instanceName! })
+    if (!connectResult.ok) return err(connectResult.error)
+    const qrCode = (connectResult.value as any)?.base64 ?? (connectResult.value as any)?.qrcode?.base64 ?? (connectResult.value as any)?.qrcode ?? null
+    const token = (connectResult.value as any)?.hash ?? (connectResult.value as any)?.instance?.hash ?? tenant.whatsappInstanceToken ?? null
+
+    await database.tenant.update({
+      where: { id: tenantId },
+      data: {
+        whatsappStatus: 'connecting',
+        whatsappQrCode: qrCode,
+        whatsappInstanceName: instanceName,
+        whatsappInstanceToken: token,
+      },
+    })
+    return ok({ qrCode, status: 'connecting', instanceName })
+  } else {
+    // Simulation mode
+    await database.tenant.update({
+      where: { id: tenantId },
+      data: {
+        whatsappInstanceName: instanceName,
+        whatsappStatus: 'connecting',
+        whatsappQrCode: `data:image/svg+xml;base64,${Buffer.from(simulatedQr('Open this app on your phone to simulate WhatsApp connection. In production, this would be a real QR code from Evolution API.')).toString('base64')}`,
+      },
+    })
+    return ok({ qrCode: `data:image/svg+xml;base64,${Buffer.from(simulatedQr('Simulation mode — connect Evolution API for real WhatsApp')).toString('base64')}`, status: 'connecting', instanceName })
+  }
+
+  // Unreachable — both branches return above
+  return err('UNREACHABLE')
 }
 
 export async function refreshWhatsAppStatus(
