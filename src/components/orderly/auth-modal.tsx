@@ -39,8 +39,8 @@ export function AuthModal({
         await login(email, password)
         toast.success('Logged in')
       } else {
-        await signup({ restaurantName, industry, ownerName, ownerEmail: email, password })
-        toast.success('Welcome to Orderly!')
+        await signup({ ownerName, ownerEmail: email, password })
+        toast.success('Account created! Set up your restaurant.')
       }
       onClose()
     } catch (e: any) {
@@ -68,52 +68,26 @@ export function AuthModal({
           </button>
         </div>
 
-        <h2 className="text-xl font-bold">{mode === 'login' ? 'Welcome back' : 'Start your free trial'}</h2>
+        <h2 className="text-xl font-bold">{mode === 'login' ? 'Welcome back' : 'Create your account'}</h2>
         <p className="mt-1 text-sm text-muted-foreground">
           {mode === 'login'
             ? 'Log in to your restaurant dashboard.'
-            : '14-day free trial · No credit card required.'}
+            : 'Sign up — then set up your restaurant in 30 seconds.'}
         </p>
 
         <form onSubmit={submit} className="mt-5 space-y-3">
           {mode === 'signup' && (
-            <>
-              <div>
-                <Label htmlFor="restaurantName">Restaurant name</Label>
-                <Input
-                  id="restaurantName"
-                  value={restaurantName}
-                  onChange={(e) => setRestaurantName(e.target.value)}
-                  placeholder="The Braai House"
-                  required
-                  className="mt-1"
-                />
-              </div>
-              <div>
-                <Label htmlFor="ownerName">Your name</Label>
-                <Input
-                  id="ownerName"
-                  value={ownerName}
-                  onChange={(e) => setOwnerName(e.target.value)}
-                  placeholder="Thabiso N."
-                  required
-                  className="mt-1"
-                />
-              </div>
-              <div>
-                <Label htmlFor="industry">Industry</Label>
-                <select
-                  id="industry"
-                  value={industry}
-                  onChange={(e) => setIndustry(e.target.value)}
-                  className="mt-1 flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                >
-                  {INDUSTRIES.map((i) => (
-                    <option key={i.id} value={i.id}>{i.label}</option>
-                  ))}
-                </select>
-              </div>
-            </>
+            <div>
+              <Label htmlFor="ownerName">Your name</Label>
+              <Input
+                id="ownerName"
+                value={ownerName}
+                onChange={(e) => setOwnerName(e.target.value)}
+                placeholder="Thabiso N."
+                required
+                className="mt-1"
+              />
+            </div>
           )}
           <div>
             <Label htmlFor="email">Email</Label>

@@ -11,6 +11,7 @@ import { SuperAdminShell } from '@/components/orderly/super-admin-shell'
 import { ClaimFlow } from '@/components/orderly/claim-flow'
 import { GeoClaimFlow } from '@/components/orderly/geo-claim-flow'
 import { HubView } from '@/components/orderly/hub-view'
+import { OnboardingFlow } from '@/components/orderly/onboarding-flow'
 import { Spinner } from '@/components/orderly/ui'
 
 function Router() {
@@ -70,7 +71,12 @@ function Router() {
     return <SuperAdminShell />
   }
 
-  // Owner / manager / staff
+  // Authenticated but no tenant → onboarding flow
+  if (user && !user.tenantId) {
+    return <OnboardingFlow />
+  }
+
+  // Owner / manager / staff with tenant
   return <AppShell />
 }
 

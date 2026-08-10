@@ -181,7 +181,7 @@ export function Marketing({ onAuth }: { onAuth: (mode: 'login' | 'signup') => vo
                   onClick={() => onAuth('signup')}
                   className="bg-[#e8722a] hover:bg-[#f0823a] text-white"
                 >
-                  Start free trial <ArrowRight className="h-4 w-4" />
+                  Get started free <ArrowRight className="h-4 w-4" />
                 </Button>
                 <Button size="lg" variant="outline" onClick={scrollToPains}>
                   See how it fills your empty chairs
@@ -189,6 +189,9 @@ export function Marketing({ onAuth }: { onAuth: (mode: 'login' | 'signup') => vo
               </div>
               <p className="mt-3 text-xs text-[#7a6a55]">
                 Live in minutes · No app for guests · Built for South African restaurants
+              </p>
+              <p className="mt-2 text-xs text-[#7a6a55]">
+                Were you invited? <button onClick={() => onAuth('login')} className="font-semibold text-[#e8722a] hover:underline">Claim your profile →</button>
               </p>
             </div>
 
