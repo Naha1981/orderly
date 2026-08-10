@@ -17,13 +17,12 @@ export async function POST(req: NextRequest) {
   })
   if (!customer) return NextResponse.json({ error: 'not found' }, { status: 404 })
 
-  const [loyaltyTransactions, rewardRedemptions, campaignRecipients, reviews, reservations] = await Promise.all([
-    db.loyaltyTransaction.findMany({ where: { tenantId: ctx.tenantId, customerId } }),
-    db.rewardRedemption.findMany({ where: { tenantId: ctx.tenantId, customerId }, include: { reward: true } }),
-    db.campaignRecipient.findMany({ where: { tenantId: ctx.tenantId, customerId }, include: { campaign: true } }),
-    db.review.findMany({ where: { tenantId: ctx.tenantId, customerId } }),
-    db.reservation.findMany({ where: { tenantId: ctx.tenantId, customerId } }),
-  ])
+  // Sequential queries to avoid exhausting Neon's connection pool
+  const loyaltyTransactions = await db.loyaltyTransaction.findMany({ where: { tenantId: ctx.tenantId, customerId } })
+  const rewardRedemptions = await db.rewardRedemption.findMany({ where: { tenantId: ctx.tenantId, customerId }, include: { reward: true } })
+  const campaignRecipients = await db.campaignRecipient.findMany({ where: { tenantId: ctx.tenantId, customerId }, include: { campaign: true } })
+  const reviews = await db.review.findMany({ where: { tenantId: ctx.tenantId, customerId } })
+  const reservations = await db.reservation.findMany({ where: { tenantId: ctx.tenantId, customerId } })
 
   return NextResponse.json({
     customer,

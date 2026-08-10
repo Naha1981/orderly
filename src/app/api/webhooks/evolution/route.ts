@@ -86,9 +86,29 @@ export async function POST(req: NextRequest) {
     const fromMe = payload?.data?.key?.fromMe ?? payload?.data?.fromMe ?? false
     // Ignore group messages and messages sent by the business itself (loop prevention)
     const isGroup = String(payload?.data?.key?.remoteJid ?? '').endsWith('@g.us')
+    const messageId = payload?.data?.key?.id
+
     if (!fromMe && !isGroup) {
+      // Idempotency: check if this message was already processed
+      if (db && messageId) {
+        const existing = await db.webhookEvent.findFirst({
+          where: {
+            tenantId,
+            source: 'evolution',
+            eventType: 'messages.upsert',
+            payload: { contains: messageId },
+            processed: true,
+          },
+          select: { id: true },
+        })
+        if (existing) {
+          // Already processed — skip silently (Evolution redelivers webhooks)
+          return NextResponse.json({ ok: true, skipped: 'duplicate' })
+        }
+      }
+
       try {
-        await routeInboundMessage(tenantId, phone, text, payload?.data?.key?.id ?? webhookEventId ?? undefined)
+        await routeInboundMessage(tenantId, phone, text, messageId ?? webhookEventId ?? undefined)
         if (db && webhookEventId) {
           await db.webhookEvent.update({ where: { id: webhookEventId }, data: { processed: true } })
         }

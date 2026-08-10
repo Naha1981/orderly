@@ -310,14 +310,21 @@ export async function verifyAndClaim(
           reference: redemption.id,
         },
       })
-      await database.customer.update({
+      // Optimistic locking: only deduct if version hasn't changed
+      const customerBefore = await database.customer.findUnique({
         where: { id: redemption.customerId },
-        data: { pointsBalance: { decrement: redemption.pointsCost } },
+        select: { version: true, phone: true, pointsBalance: true },
       })
+      if (!customerBefore) return { ok: false, reason: 'not_found' }
+      const claimResult = await database.customer.updateMany({
+        where: { id: redemption.customerId, tenantId, version: customerBefore.version },
+        data: { pointsBalance: { decrement: redemption.pointsCost }, version: { increment: 1 } },
+      })
+      if (claimResult.count === 0) return { ok: false, reason: 'already_claimed' }
       await sendMessage(
         tenantId,
-        (await database.customer.findUnique({ where: { id: redemption.customerId }, select: { phone: true } }))!.phone,
-        `✅ ${redemption.reward.name} claimed!\n\nShow this code to staff: ${redemption.confirmationQr}\n\nYou now have ${(await database.customer.findUnique({ where: { id: redemption.customerId }, select: { pointsBalance: true } }))!.pointsBalance} points remaining.`,
+        customerBefore.phone,
+        `✅ ${redemption.reward.name} claimed!\n\nShow this code to staff: ${redemption.confirmationQr}\n\nYou now have ${customerBefore.pointsBalance - redemption.pointsCost} points remaining.`,
         { customerId: redemption.customerId, idempotencyKey: `redeem-claimed-${redemption.id}` },
       )
       emit({ type: 'reward.redeemed', tenantId, entityId: redemption.id, payload: { customerId: redemption.customerId, rewardId: redemption.rewardId } })
@@ -366,21 +373,28 @@ export async function verifyAndClaim(
       reference: redemption.id,
     },
   })
-  const updated = await database.customer.update({
+  // Optimistic locking: only deduct if version hasn't changed
+  const customerBefore = await database.customer.findUnique({
     where: { id: redemption.customerId },
+    select: { version: true, pointsBalance: true, phone: true },
+  })
+  if (!customerBefore) return { ok: false, reason: 'not_found' }
+  const claimResult = await database.customer.updateMany({
+    where: { id: redemption.customerId, tenantId, version: customerBefore.version },
     data: {
       pointsBalance: { decrement: redemption.pointsCost },
+      version: { increment: 1 },
       totalVisits: { increment: 1 },
       lastVisitAt: new Date(),
     },
-    select: { pointsBalance: true, phone: true },
   })
+  if (claimResult.count === 0) return { ok: false, reason: 'already_claimed' }
 
   // Confirm to customer
   await sendMessage(
     tenantId,
-    updated.phone,
-    `✅ ${redemption.reward.name} claimed!\n\nShow this code to staff: ${redemption.confirmationQr}\n\nYou now have ${updated.pointsBalance} points remaining.`,
+    customerBefore.phone,
+    `✅ ${redemption.reward.name} claimed!\n\nShow this code to staff: ${redemption.confirmationQr}\n\nYou now have ${customerBefore.pointsBalance - redemption.pointsCost} points remaining.`,
     { customerId: redemption.customerId, idempotencyKey: `redeem-claimed-${redemption.id}` },
   )
 

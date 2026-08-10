@@ -113,10 +113,12 @@ export async function executeAction(action: Action, ctx: RuleContext): Promise<A
       case 'set_customer_status': {
         if (!ctx.customer) return { success: false, error: 'no customer in context' }
         const database = requireDb()
-        await database.customer.update({
-          where: { id: ctx.customer.id },
+        // Tenant-scoped update: use updateMany with tenantId filter
+        const result = await database.customer.updateMany({
+          where: { id: ctx.customer.id, tenantId: ctx.tenantId },
           data: { status: action.status },
         })
+        if (result.count === 0) return { success: false, error: 'customer not found in tenant' }
         // Reflect the change in the in-memory ctx so subsequent actions in
         // the same rule see the new status.
         ctx.customer = { ...ctx.customer, status: action.status }

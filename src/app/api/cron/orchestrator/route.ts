@@ -23,9 +23,19 @@ export async function POST(req: NextRequest) {
 
   if (!db) return NextResponse.json({ error: 'db unavailable' }, { status: 503 })
 
+  // Chunking: process at most `maxTenants` per invocation to avoid serverless timeout
+  const maxTenants = parseInt(url.searchParams.get('maxTenants') ?? '10')
+  const offset = parseInt(url.searchParams.get('offset') ?? '0')
+
   try {
-    const tenants = await db.tenant.findMany({ select: { id: true } })
+    const tenants = await db.tenant.findMany({
+      select: { id: true },
+      take: maxTenants,
+      skip: offset,
+      orderBy: { id: 'asc' },
+    })
     const summary: Record<string, any> = {}
+    let hasMore = tenants.length === maxTenants
 
     for (const t of tenants) {
       try {
@@ -44,6 +54,8 @@ export async function POST(req: NextRequest) {
       ok: true,
       cadence,
       tenantsProcessed: tenants.length,
+      hasMore,
+      nextOffset: hasMore ? offset + maxTenants : null,
       summary,
     })
   } catch (e: any) {

@@ -517,16 +517,15 @@ export async function attributeRedemption(
   try {
     const database = requireDb()
 
-    const [campaign, customer] = await Promise.all([
-      database.campaign.findFirst({
-        where: { id: campaignId, tenantId },
-        select: { id: true },
-      }),
-      database.customer.findFirst({
-        where: { id: customerId, tenantId },
-        select: { id: true },
-      }),
-    ])
+    // Sequential queries to avoid exhausting Neon's connection pool
+    const campaign = await database.campaign.findFirst({
+      where: { id: campaignId, tenantId },
+      select: { id: true },
+    })
+    const customer = await database.customer.findFirst({
+      where: { id: customerId, tenantId },
+      select: { id: true },
+    })
     if (!campaign) return err('CAMPAIGN_NOT_FOUND')
     if (!customer) return err('CUSTOMER_NOT_FOUND')
 
