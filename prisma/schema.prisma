@@ -104,6 +104,11 @@ model Tenant {
   currency        String   @default("ZAR")
   // Slug for Restaurant Hub
   slug            String?  @unique
+  // Concierge personality (voice/tone for AI concierge)
+  persona         String?
+  // Claim token for demo-tenant pre-seeding (magic link hand-off)
+  claimToken      String?  @unique
+  claimedAt       DateTime?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt @default(now())
 

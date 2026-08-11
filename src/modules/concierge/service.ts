@@ -51,10 +51,11 @@ function truncateForContext(s: string, cap: number): string {
   return s.slice(0, cut) + '…'
 }
 
-function buildSystemPrompt(restaurantName: string, currencyName: string): string {
+function buildSystemPrompt(restaurantName: string, currencyName: string, persona?: string | null): string {
   return [
     `You are the friendly WhatsApp concierge for ${restaurantName}, a restaurant in South Africa.`,
     `Guests text you questions. You answer by calling your tools to get real information.`,
+    persona ? `Your voice and personality: ${persona}.` : '',
     ``,
     `GROUNDING RULES (critical):`,
     `- ALWAYS use a tool to get facts (menu, hours, specials, balance, policies). NEVER invent prices, dishes, hours, or policies from memory.`,
@@ -72,7 +73,7 @@ function buildSystemPrompt(restaurantName: string, currencyName: string): string
     `- Use the guest's name if a tool gives it to you.`,
     ``,
     `If the guest wants to book, ask them for the date, time, and number of people.`,
-  ].join('\n')
+  ].filter(Boolean).join('\n')
 }
 
 function buildUserPrompt(args: {
@@ -187,7 +188,7 @@ export async function answerWithConcierge(
     // 1. Load tenant (for name + currencyName)
     const tenant = await database.tenant.findUnique({
       where: { id: tenantId },
-      select: { name: true, currencyName: true },
+      select: { name: true, currencyName: true, persona: true },
     })
     if (!tenant) {
       // No tenant — can't ground. Fall back.
@@ -246,6 +247,7 @@ export async function answerWithConcierge(
     const systemPrompt = buildSystemPrompt(
       tenant.name,
       tenant.currencyName || 'Points',
+      tenant.persona,
     )
     const userPrompt = buildUserPrompt({
       message,
